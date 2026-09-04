@@ -941,6 +941,10 @@ def render_dashboard(conn, query) -> str:
     if not rows:
         rows = '<tr><td colspan="7" class="muted">Aun no hay movimientos registrados.</td></tr>'
     synchronization = sync_status()
+    selected_chart_months = query.get("chart_month", [])
+    if not selected_chart_months:
+      selected_chart_months = [add_months(today.replace(day=1), offset).strftime("%Y-%m") for offset in range(-5, 1)]
+    chart = dashboard_chart(conn, selected_chart_months)
 
     return page(
         "Inicio",
@@ -1011,6 +1015,17 @@ def render_dashboard(conn, query) -> str:
               <tbody>{rows}</tbody>
             </table>
           </div>
+        </section>
+
+        <section class="panel dashboard-chart-panel">
+          <div class="section-head">
+            <div><h2>Ingresos y egresos por mes</h2><p class="muted">Elige uno o varios meses para comparar el movimiento contra sus saldos.</p></div>
+          </div>
+          <form class="chart-filters" method="get" action="/">
+            <div class="month-choices">{dashboard_month_options(selected_chart_months)}</div>
+            <button class="button primary" type="submit">Actualizar grafica</button>
+          </form>
+          {chart}
         </section>
         """,
         "/",
@@ -1917,6 +1932,63 @@ def period_summary(conn, start: str, end: str, property_id: int | None = None) -
         "expense": expense,
         "final": final,
     }
+
+
+def dashboard_month_options(selected_months: list[str]) -> str:
+  current = date.today().replace(day=1)
+  options = []
+  for offset in range(11, -1, -1):
+    month_start = add_months(current, -offset)
+    value = month_start.strftime("%Y-%m")
+    label = f"{MONTHS[month_start.month].capitalize()} {month_start.year}"
+    checked = " checked" if value in selected_months else ""
+    options.append(f'<label class="month-choice"><input type="checkbox" name="chart_month" value="{value}"{checked}> {label}</label>')
+  return "".join(options)
+
+
+def dashboard_chart(conn, selected_months: list[str]) -> str:
+  current = date.today().replace(day=1)
+  valid_months = []
+  for value in selected_months:
+    try:
+      month_start = datetime.strptime(value, "%Y-%m").date().replace(day=1)
+    except ValueError:
+      continue
+    if month_start not in valid_months:
+      valid_months.append(month_start)
+  valid_months = sorted(valid_months)
+  if not valid_months:
+    valid_months = [add_months(current, offset) for offset in range(-5, 1)]
+
+  chart_data = []
+  for month_start in valid_months:
+    month_end = add_months(month_start, 1) - timedelta(days=1)
+    summary = period_summary(conn, month_start.isoformat(), month_end.isoformat())
+    chart_data.append({
+      "label": f"{MONTHS[month_start.month][:3].title()} {month_start.year}",
+      "opening": summary["opening"],
+      "income": summary["income"],
+      "expense": summary["expense"],
+      "final": summary["final"],
+    })
+
+  maximum = max(
+    [item["opening"] for item in chart_data]
+    + [item["income"] for item in chart_data]
+    + [item["expense"] for item in chart_data]
+    + [item["final"] for item in chart_data]
+    + [1]
+  )
+  groups = []
+  for item in chart_data:
+    bars = "".join(
+            f'<div class="chart-bar chart-{name}" style="height: {max(3, round(item[name] / maximum * 100))}%"><span class="chart-tooltip">{label}: {format_money(item[name])}</span></div>'
+      for name, label in (("opening", "Saldo inicial"), ("income", "Ingresos"), ("expense", "Egresos"), ("final", "Saldo final"))
+    )
+    groups.append(
+      f'''<div class="chart-group"><div class="chart-values"><span class="chart-opening">{format_money(item["opening"])}</span><span class="chart-final">{format_money(item["final"])}</span></div><div class="chart-bars">{bars}</div><strong>{esc(item["label"])}</strong></div>'''
+    )
+  return f'''<div class="chart-legend"><span><i class="legend-income"></i>Ingresos</span><span><i class="legend-expense"></i>Egresos</span><span><i class="legend-opening"></i>Saldo inicial</span><span><i class="legend-final"></i>Saldo final</span></div><div class="chart-area">{"".join(groups)}</div>'''
 
 
 def report_movements(conn, start: str, end: str, property_id: int | None = None):
