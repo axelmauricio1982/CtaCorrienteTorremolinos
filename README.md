@@ -15,12 +15,20 @@ Incluye funcionalidades para:
 - Controlar movimientos de caja
 - Visualizar flujo de caja con saldo acumulado
 - Generar recibos imprimibles
+- Descargar recibos PDF con sus evidencias anexas
 - Exportar información en CSV
+- Guardar evidencias localmente y sincronizarlas opcionalmente con OneDrive Personal
 
 ## Requisitos
 
 - Python 3.10 o superior
 - No requiere dependencias externas adicionales para esta versión inicial
+
+Para descargar recibos PDF con evidencias, instala las dependencias del proyecto:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 ## Ejecutar el proyecto
 
@@ -33,6 +41,32 @@ Luego abre esta dirección en el navegador:
 ```text
 http://127.0.0.1:8000
 ```
+
+## OneDrive Personal
+
+La aplicación conserva cada comprobante en `data/attachments/` y también lo copia automáticamente a la carpeta sincronizada de OneDrive:
+
+```text
+/Users/axll/OneDrive/Torremolinos/Evidencias
+```
+
+La ruta predeterminada es `OneDrive/Torremolinos/Evidencias`. Para usar otra ubicación, configura `ONEDRIVE_LOCAL_FOLDER` antes de iniciar la aplicación.
+
+macOS/Linux:
+
+```bash
+export ONEDRIVE_LOCAL_FOLDER="$HOME/OneDrive"
+python3 app.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ONEDRIVE_LOCAL_FOLDER = "$HOME\OneDrive"
+python app.py
+```
+
+No se necesitan Microsoft Entra, Client ID, contraseñas ni tokens. Si OneDrive no está disponible, el comprobante permanece guardado localmente y queda registrado para revisión.
 
 En Windows puedes usar:
 

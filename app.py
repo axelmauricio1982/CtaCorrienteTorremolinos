@@ -5,7 +5,9 @@ import csv
 import html
 import io
 import mimetypes
+import os
 import re
+import shutil
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
@@ -25,6 +27,8 @@ APP_NAME = "Residencial Torremolinos"
 CURRENT_USER = "ADM"
 PAGE_SIZE = 10
 ATTACHMENT_DIR = BASE_DIR / "data" / "attachments"
+ONEDRIVE_LOCAL_FOLDER = Path(os.environ.get("ONEDRIVE_LOCAL_FOLDER", str(Path.home() / "OneDrive")))
+ONEDRIVE_EVIDENCE_DIR = ONEDRIVE_LOCAL_FOLDER / "Torremolinos" / "Evidencias"
 ALLOWED_ATTACHMENT_TYPES = {
     "image/jpeg",
     "image/jpg",
@@ -180,6 +184,81 @@ def receipt_pdf_filename(receipt) -> str:
         concept = re.sub(r"[^a-zA-Z0-9]+", "_", concept).strip("_").lower()
         base_name = f"{concept or 'servicio'}_pagado_{month_year}"
     return f"{base_name}.pdf"
+
+
+def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
+    try:
+        import fitz
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+    except ImportError as error:
+        raise ValueError("Para generar PDF con evidencia instala reportlab y pymupdf.") from error
+
+    receipt = conn.execute(
+        """
+        SELECT r.*, m.amount_cents, m.period_month, m.period_year, m.reference,
+               m.description, p.house_number, p.notes AS property_notes,
+               c.name AS concept_name, c.frequency
+        FROM receipts r
+        JOIN movements m ON m.id = r.movement_id
+        JOIN concepts c ON c.id = m.concept_id
+        LEFT JOIN properties p ON p.id = m.property_id
+        WHERE r.id = ? AND r.is_deleted = 0 AND m.is_deleted = 0
+        """,
+        (receipt_id,),
+    ).fetchone()
+    if not receipt:
+        raise ValueError("Recibo no encontrado.")
+
+    output = io.BytesIO()
+    styles = getSampleStyleSheet()
+    document = SimpleDocTemplate(output, pagesize=letter, rightMargin=0.7 * inch, leftMargin=0.7 * inch)
+    period_month = receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])
+    period_year = receipt["period_year"] or int(receipt["issued_date"][:4])
+    concept_text = receipt_concept_text(receipt)
+    counterpart = receipt["payer_name"] if receipt["direction"] == "INGRESO" else receipt["receiver_name"]
+    title = "Recibo de ingreso" if receipt["direction"] == "INGRESO" else "Comprobante de egreso"
+    story = [
+        Paragraph("<b>RESIDENCIAL TORREMOLINOS</b>", styles["Title"]),
+        Paragraph(f"<b>{title}</b> &nbsp;&nbsp; No. {esc(receipt['receipt_no'])}", styles["Heading2"]),
+        Spacer(1, 12),
+        Paragraph(f"<b>CANCELADO</b><br/>Lugar: {esc(receipt['place'])}<br/>Fecha: {format_date(receipt['issued_date'])}<br/>Monto: {format_money(receipt['amount_cents'])}", styles["BodyText"]),
+        Spacer(1, 12),
+        Paragraph(f"Recibí de: {esc(counterpart)}", styles["BodyText"]),
+        Paragraph(f"La cantidad de: {esc(receipt['amount_words'])}", styles["BodyText"]),
+        Paragraph(f"Por concepto de: {esc(concept_text)}", styles["BodyText"]),
+        Paragraph(f"Periodo: Mes de {MONTHS[period_month].title()} Año {period_year}", styles["BodyText"]),
+        Paragraph(f"Referencia: {esc(receipt['reference'] or 'No aplica')}", styles["BodyText"]),
+        Spacer(1, 36),
+        Paragraph("Entrega / paga__________________________________________________", styles["BodyText"]),
+        Spacer(1, 24),
+        Paragraph("Recibe________________________________________________________", styles["BodyText"]),
+    ]
+    document.build(story)
+    combined = fitz.open(stream=output.getvalue(), filetype="pdf")
+    attachments = conn.execute(
+        "SELECT * FROM movement_attachments WHERE movement_id = ? ORDER BY uploaded_at, id",
+        (receipt["movement_id"],),
+    ).fetchall()
+    for attachment in attachments:
+      path = Path(attachment["local_path"])
+      if not path.exists():
+            continue
+      content = path.read_bytes()
+      if attachment["content_type"] == "application/pdf" or path.suffix.lower() == ".pdf":
+        evidence = fitz.open(stream=content, filetype="pdf")
+      else:
+        evidence = fitz.open(stream=content, filetype=path.suffix.lower().lstrip("."))
+        evidence_pdf = fitz.open(stream=evidence.convert_to_pdf(), filetype="pdf")
+        evidence.close()
+        evidence = evidence_pdf
+        combined.insert_pdf(evidence)
+        evidence.close()
+    pdf_bytes = combined.tobytes()
+    combined.close()
+    return pdf_bytes, receipt_pdf_filename(receipt)
 
 
 def receipt_concept_text(movement) -> str:
@@ -408,6 +487,36 @@ def save_movement_attachment(conn, movement_id: int, uploaded_file, created_by: 
     )
     add_movement_log(conn, movement_id, "ATTACHMENT_ADDED", f"Adjunto '{filename}' guardado como evidencia.", created_by)
     return cursor.lastrowid
+
+
+def onedrive_error_message(error: Exception) -> str:
+    return f"OneDrive: {error}"
+
+
+def sync_attachment_to_onedrive_folder(conn, attachment_id: int) -> str:
+    attachment = conn.execute(
+        "SELECT * FROM movement_attachments WHERE id = ?", (attachment_id,)
+    ).fetchone()
+    if not attachment:
+        raise ValueError("Evidencia no encontrada.")
+    source = Path(attachment["local_path"])
+    if not source.exists():
+        raise ValueError("No se encontró el archivo local de evidencia.")
+    ONEDRIVE_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    destination = ONEDRIVE_EVIDENCE_DIR / attachment["stored_name"]
+    shutil.copy2(source, destination)
+    remote_path = str(destination)
+    conn.execute(
+        "UPDATE movement_attachments SET remote_url = ? WHERE id = ?",
+        (remote_path, attachment_id),
+    )
+    add_movement_log(
+      conn,
+      attachment["movement_id"],
+      "SYNCED",
+      f"Evidencia '{attachment['original_name']}' copiada a OneDrive.",
+    )
+    return remote_path
 
 
 class UploadedFile:
@@ -1433,6 +1542,7 @@ def render_movements(conn, query) -> str:
 
           <aside class="panel help-panel">
             <h2>Reglas actuales</h2>
+            <p>Los comprobantes se guardan localmente y se copian automáticamente a {esc(ONEDRIVE_EVIDENCE_DIR)} cuando OneDrive está disponible.</p>
             <p>El tipo del movimiento lo define el concepto seleccionado. Si el concepto requiere recibo, el sistema genera uno automaticamente.</p>
             <p>Los pagos de agua y electricidad quedan en flujo de caja, pero no generan recibo interno por defecto.</p>
             <p>Si el monto se deja vacio, se intenta usar la vigencia activa del concepto y empleado seleccionado.</p>
@@ -2167,6 +2277,7 @@ def render_receipt(conn, receipt_id: int) -> str:
   <main class="receipt-shell">
     <div class="receipt-actions">
       <a class="button" href="/receipts">Volver</a>
+      <a class="button" href="/receipt/{receipt_id}.pdf">Descargar PDF con evidencia</a>
       <button class="button primary" onclick="window.print()">Guardar {esc(pdf_filename)}</button>
     </div>
     <form class="receipt-preview-controls" method="post" action="/receipt/update">
@@ -2271,6 +2382,10 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.send_csv(cashflow_csv(conn, query), "flujo_caja.csv")
                 elif parsed.path == "/receipts":
                     self.send_html(render_receipts(conn, query))
+                elif parsed.path.startswith("/receipt/") and parsed.path.endswith(".pdf"):
+                  receipt_id = int(parsed.path.rsplit("/", 1)[1][:-4])
+                  pdf_bytes, filename = build_receipt_pdf(conn, receipt_id)
+                  self.send_pdf(pdf_bytes, filename)
                 elif parsed.path.startswith("/receipt/"):
                     receipt_id = int(parsed.path.rsplit("/", 1)[1])
                     self.send_html(render_receipt(conn, receipt_id))
@@ -2726,8 +2841,14 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         add_movement_log(conn, movement_id, "CREATED", f"Movimiento registrado: {concept['name']}.", CURRENT_USER)
 
         attachment = data.get("attachment")
+        attachment_id = None
         if attachment is not None and hasattr(attachment, "filename"):
-            save_movement_attachment(conn, movement_id, attachment, CURRENT_USER)
+            attachment_id = save_movement_attachment(conn, movement_id, attachment, CURRENT_USER)
+            if attachment_id:
+                try:
+                  sync_attachment_to_onedrive_folder(conn, int(attachment_id))
+                except OSError as error:
+                  add_movement_log(conn, movement_id, "COMMENTED", onedrive_error_message(error), CURRENT_USER)
 
         if concept["requires_receipt"]:
             return create_receipt(conn, movement_id)
@@ -2762,6 +2883,14 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def send_pdf(self, content: bytes, filename: str):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
 
     def redirect(self, location: str):
         self.send_response(303)
