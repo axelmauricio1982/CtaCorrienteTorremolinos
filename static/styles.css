@@ -136,6 +136,19 @@ nav a:hover {
   color: var(--expense);
 }
 
+.report-opening {
+  color: var(--text);
+}
+
+.report-income,
+.report-final {
+  color: var(--income);
+}
+
+.report-expense {
+  color: var(--expense);
+}
+
 .toolbar,
 .filters {
   display: flex;
@@ -153,6 +166,44 @@ nav a:hover {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
+}
+
+.report-months {
+  display: grid;
+  gap: 10px;
+}
+
+.report-month {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.report-month summary {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.8fr) repeat(4, minmax(135px, auto));
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  cursor: pointer;
+  font-weight: 600;
+  list-style-position: inside;
+}
+
+.report-month summary:hover {
+  background: var(--surface-muted);
+}
+
+.report-month .table-wrap {
+  margin: 0 10px 10px;
+  max-height: 300px;
+}
+
+@media (max-width: 900px) {
+  .report-month summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .table-wrap table {

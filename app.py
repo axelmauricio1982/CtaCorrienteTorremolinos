@@ -1819,6 +1819,115 @@ def period_summary(conn, start: str, end: str, property_id: int | None = None) -
     }
 
 
+def report_movements(conn, start: str, end: str, property_id: int | None = None):
+    params = [start, end]
+    property_filter = ""
+    if property_id:
+      property_filter = " AND m.property_id = ?"
+      params.append(property_id)
+    return conn.execute(
+      f"""
+      SELECT m.*, c.name AS concept_name, r.id AS receipt_id, r.receipt_no,
+           p.house_number, p.owner_name, e.name AS employee_name
+      FROM movements m
+      JOIN concepts c ON c.id = m.concept_id
+      LEFT JOIN receipts r ON r.movement_id = m.id
+      LEFT JOIN properties p ON p.id = m.property_id
+      LEFT JOIN employees e ON e.id = m.employee_id
+      WHERE m.is_deleted = 0
+        AND m.movement_date BETWEEN ? AND ?
+        {property_filter}
+      ORDER BY m.movement_date, m.id
+      """,
+      params,
+    ).fetchall()
+
+
+def report_detail_rows(conn, start: str, end: str, property_id: int | None = None) -> str:
+    movements = report_movements(conn, start, end, property_id)
+    rows = "".join(movement_row(row, include_balance=False, detail=True) for row in movements)
+    return rows or '<tr><td colspan="8" class="muted">No hay movimientos en este mes.</td></tr>'
+
+
+def report_pdf_filename(start: str, end: str, property_id: int | None = None) -> str:
+    suffix = f"_casa_{property_id}" if property_id else "_todas_las_casas"
+    return f"reporte_financiero_{start}_{end}{suffix}.pdf"
+
+
+def build_report_pdf(conn, start: str, end: str, property_id: int | None = None) -> tuple[bytes, str]:
+    try:
+      from reportlab.lib import colors
+      from reportlab.lib.pagesizes import letter, landscape
+      from reportlab.lib.styles import getSampleStyleSheet
+      from reportlab.lib.units import inch
+      from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError as error:
+      raise ValueError("Para generar PDF instala las dependencias de requirements.txt.") from error
+
+    summary = period_summary(conn, start, end, property_id)
+    property_label = "Todas las casas"
+    if property_id:
+      selected = conn.execute(
+        "SELECT house_number, owner_name FROM properties WHERE id = ?", (property_id,)
+      ).fetchone()
+      if selected:
+        property_label = f"Casa {selected['house_number']} - {selected['owner_name']}"
+
+    styles = getSampleStyleSheet()
+    output = io.BytesIO()
+    document = SimpleDocTemplate(
+      output,
+      pagesize=landscape(letter),
+      rightMargin=0.45 * inch,
+      leftMargin=0.45 * inch,
+      topMargin=0.4 * inch,
+      bottomMargin=0.4 * inch,
+    )
+    story = [
+      Paragraph("<b>RESIDENCIAL TORREMOLINOS</b>", styles["Title"]),
+      Paragraph("<b>Reporte financiero</b>", styles["Heading2"]),
+      Paragraph(f"Periodo: {format_date(start)} al {format_date(end)}<br/>Casa: {esc(property_label)}", styles["BodyText"]),
+      Spacer(1, 10),
+    ]
+    summary_data = [
+      ["Saldo inicial", "Ingresos", "Egresos", "Saldo final"],
+      [format_money(summary["opening"]), format_money(summary["income"]), format_money(summary["expense"]), format_money(summary["final"])],
+    ]
+    summary_table = Table(summary_data, colWidths=[1.9 * inch] * 4)
+    summary_table.setStyle(TableStyle([
+      ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef3f1")),
+      ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9e2de")),
+      ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+      ("PADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([summary_table, Spacer(1, 14), Paragraph("<b>Detalle de movimientos</b>", styles["Heading3"])])
+    detail_data = [["Fecha", "Tipo", "Concepto", "Contraparte", "Ingreso", "Egreso", "Referencia"]]
+    for row in report_movements(conn, start, end, property_id):
+      counterparty = row["counterparty"] or row["employee_name"] or (
+        f"Casa {row['house_number']} - {row['owner_name']}" if row["house_number"] else ""
+      )
+      detail_data.append([
+        format_date(row["movement_date"]), row["direction"].title(), row["concept_name"], counterparty,
+        format_money(row["amount_cents"]) if row["direction"] == "INGRESO" else "-",
+        format_money(row["amount_cents"]) if row["direction"] == "EGRESO" else "-",
+        row["reference"] or "",
+      ])
+    if len(detail_data) == 1:
+      detail_data.append(["No hay movimientos en este periodo.", "", "", "", "", "", ""])
+    detail_table = Table(detail_data, colWidths=[0.8 * inch, 0.75 * inch, 1.7 * inch, 2.35 * inch, 1.05 * inch, 1.05 * inch, 1.55 * inch], repeatRows=1)
+    detail_table.setStyle(TableStyle([
+      ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef3f1")),
+      ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9e2de")),
+      ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+      ("FONTSIZE", (0, 0), (-1, -1), 8),
+      ("VALIGN", (0, 0), (-1, -1), "TOP"),
+      ("PADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(detail_table)
+    document.build(story)
+    return output.getvalue(), report_pdf_filename(start, end, property_id)
+
+
 def render_reports(conn, query) -> str:
     today = date.today()
     property_id = parse_int(query.get("property_id", [""])[0])
@@ -1843,22 +1952,29 @@ def render_reports(conn, query) -> str:
             "label": month_start.strftime("%b %Y").replace(".", ""),
             "start": month_start.isoformat(),
             "end": month_end.isoformat(),
+            "opening": current["opening"],
             "income": current["income"],
             "expense": current["expense"],
             "final": current["final"],
+            "details": report_detail_rows(conn, month_start.isoformat(), month_end.isoformat(), property_id),
         })
 
     comparison_rows = "".join(
         f"""
-        <tr>
-          <td>{esc(item['label'])}</td>
-          <td>{format_money(item['income'])}</td>
-          <td>{format_money(item['expense'])}</td>
-          <td>{format_money(item['final'])}</td>
-        </tr>
+        <details class="report-month"{' open' if item['start'] == start and item['end'] == end else ''}>
+          <summary><span class="report-month-name">{esc(item['label'])}</span><span class="report-opening">Saldo inicial: {format_money(item['opening'])}</span><span class="report-income">Ingresos: {format_money(item['income'])}</span><span class="report-expense">Egresos: {format_money(item['expense'])}</span><span class="report-final">Saldo final: {format_money(item['final'])}</span></summary>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th></tr></thead>
+              <tbody>{item['details']}</tbody>
+            </table>
+          </div>
+        </details>
         """
         for item in comparison
     )
+    report_params = {"property_id": property_id or "", "month": selected_month, "from": start, "to": end}
+    report_pdf_url = f"/reports.pdf?{urlencode(report_params)}"
 
     return page(
         "Reportes",
@@ -1866,6 +1982,7 @@ def render_reports(conn, query) -> str:
         <section class="panel">
           <div class="section-head">
             <h2>Reportes financieros</h2>
+            <a class="button" href="{report_pdf_url}">Descargar PDF</a>
           </div>
           <form class="filters" method="get" action="/reports">
             <label>Casa
@@ -1892,19 +2009,7 @@ def render_reports(conn, query) -> str:
             <article class="metric"><span>Saldo final</span><strong class="{'positive' if summary['final'] >= 0 else 'negative'}">{format_money(summary['final'])}</strong></article>
           </section>
 
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Mes</th>
-                  <th>Ingresos</th>
-                  <th>Egresos</th>
-                  <th>Saldo final</th>
-                </tr>
-              </thead>
-              <tbody>{comparison_rows}</tbody>
-            </table>
-          </div>
+          <section class="report-months">{comparison_rows}</section>
         </section>
         """,
         "/reports",
@@ -2374,6 +2479,16 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.send_html(render_account_statement(conn, query))
                 elif parsed.path == "/reports":
                     self.send_html(render_reports(conn, query))
+                elif parsed.path == "/reports.pdf":
+                  today = date.today()
+                  property_id = parse_int(query.get("property_id", [""])[0])
+                  start, end, _ = period_from_query(
+                    query,
+                    today.replace(day=1).isoformat(),
+                    today.isoformat(),
+                  )
+                  pdf_bytes, filename = build_report_pdf(conn, start, end, property_id)
+                  self.send_pdf(pdf_bytes, filename)
                 elif parsed.path == "/cash-settings":
                     self.send_html(render_cash_settings(conn, query))
                 elif parsed.path == "/cashflow":
