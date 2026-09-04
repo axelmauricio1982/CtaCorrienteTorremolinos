@@ -4,6 +4,7 @@ import argparse
 import csv
 import html
 import io
+import json
 import mimetypes
 import os
 import re
@@ -30,6 +31,7 @@ PAGE_SIZE = 10
 ATTACHMENT_DIR = BASE_DIR / "data" / "attachments"
 ONEDRIVE_LOCAL_FOLDER = Path(os.environ.get("ONEDRIVE_LOCAL_FOLDER", str(Path.home() / "OneDrive")))
 ONEDRIVE_EVIDENCE_DIR = ONEDRIVE_LOCAL_FOLDER / "Torremolinos" / "Evidencias"
+SYNC_STATE_FILE = BASE_DIR / ".torremolinos-sync.json"
 ALLOWED_ATTACHMENT_TYPES = {
     "image/jpeg",
     "image/jpg",
@@ -427,6 +429,43 @@ def notice(query: dict[str, list[str]]) -> str:
     return '<div class="notice">Operacion registrada correctamente.</div>'
 
 
+def sync_status() -> dict[str, str]:
+  status = {"push": "No disponible", "push_commit": "", "pull": "Nunca registrado"}
+  try:
+    latest = subprocess.run(
+      ["git", "show", "-s", "--format=%cI%x09%h", "origin/main"],
+      cwd=BASE_DIR,
+      check=True,
+      capture_output=True,
+      text=True,
+      timeout=10,
+    ).stdout.strip().split("\t", 1)
+    if len(latest) == 2:
+      pushed_at = datetime.fromisoformat(latest[0]).astimezone().strftime("%d/%m/%Y %H:%M")
+      status["push"] = pushed_at
+      status["push_commit"] = latest[1]
+  except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError):
+    pass
+  try:
+    saved = json.loads(SYNC_STATE_FILE.read_text(encoding="utf-8"))
+    if saved.get("pull"):
+      pulled_at = datetime.fromisoformat(saved["pull"]).astimezone().strftime("%d/%m/%Y %H:%M")
+      status["pull"] = pulled_at
+  except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    pass
+  return status
+
+
+def save_sync_timestamp(action: str) -> None:
+  state = {}
+  try:
+    state = json.loads(SYNC_STATE_FILE.read_text(encoding="utf-8"))
+  except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    pass
+  state[action] = datetime.now().astimezone().isoformat()
+  SYNC_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+
+
 def git_sync(action: str) -> str:
   if action == "pull":
     command = ["git", "pull", "--ff-only", "origin", "main"]
@@ -465,6 +504,7 @@ def git_sync(action: str) -> str:
     raise ValueError(f"No se pudo completar {action}: {detail}") from error
   except subprocess.TimeoutExpired as error:
     raise ValueError(f"La operacion {action} excedio el tiempo limite de 60 segundos.") from error
+  save_sync_timestamp(action)
   return success_message
 
 
@@ -900,6 +940,7 @@ def render_dashboard(conn, query) -> str:
     rows = "".join(movement_row(row, include_balance=False) for row in last_movements)
     if not rows:
         rows = '<tr><td colspan="7" class="muted">Aun no hay movimientos registrados.</td></tr>'
+    synchronization = sync_status()
 
     return page(
         "Inicio",
@@ -942,6 +983,10 @@ def render_dashboard(conn, query) -> str:
               <form method="post" action="/sync"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull desde GitHub</button></form>
               <form method="post" action="/sync" onsubmit="return confirm('Se publicara la base de datos y las evidencias actuales en GitHub. ¿Continuar?');"><input type="hidden" name="action" value="push"><button class="button primary" type="submit">Push a GitHub</button></form>
             </div>
+          </div>
+          <div class="sync-history">
+            <div><span>Ultimo Push</span><strong>{esc(synchronization['push'])}</strong>{f'<small>Commit {esc(synchronization["push_commit"])}</small>' if synchronization['push_commit'] else ''}</div>
+            <div><span>Ultimo Pull</span><strong>{esc(synchronization['pull'])}</strong></div>
           </div>
         </section>
 

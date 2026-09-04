@@ -157,6 +157,41 @@ nav a:hover {
   margin: 0;
 }
 
+.sync-history {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.sync-history div {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.sync-history span,
+.sync-history strong,
+.sync-history small {
+  display: block;
+}
+
+.sync-history span,
+.sync-history small {
+  color: var(--muted);
+}
+
+.sync-history strong {
+  margin-top: 4px;
+}
+
+@media (max-width: 700px) {
+  .sync-history {
+    grid-template-columns: 1fr;
+  }
+}
+
 .report-opening {
   color: var(--text);
 }

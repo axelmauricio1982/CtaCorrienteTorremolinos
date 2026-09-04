@@ -18,3 +18,4 @@ data/*.db
 data/*.sqlite3-shm
 data/*.sqlite3-wal
 data/attachments/
+.torremolinos-sync.json
