@@ -4,7 +4,13 @@ import argparse
 import csv
 import html
 import io
+import mimetypes
+import re
+import unicodedata
+import uuid
 from datetime import date, datetime, timedelta
+from email.parser import BytesParser
+from email.policy import default as email_default
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +24,15 @@ DEFAULT_DB = BASE_DIR / "data" / "torremolinos.sqlite3"
 APP_NAME = "Residencial Torremolinos"
 CURRENT_USER = "ADM"
 PAGE_SIZE = 10
+ATTACHMENT_DIR = BASE_DIR / "data" / "attachments"
+ALLOWED_ATTACHMENT_TYPES = {
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "application/pdf",
+}
+ALLOWED_ATTACHMENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
 
 MONTHS = {
     1: "enero",
@@ -34,9 +49,78 @@ MONTHS = {
     12: "diciembre",
 }
 
+TABLE_SORT_SCRIPT = """
+<script>
+(function () {
+  function cellValue(cell) {
+    var text = (cell ? cell.textContent : '').trim();
+    var dateMatch = text.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+    if (dateMatch) {
+      return { type: 'number', value: Date.UTC(Number(dateMatch[3]), Number(dateMatch[2]) - 1, Number(dateMatch[1])) };
+    }
+    var numeric = text.replace(/[^\\d.-]/g, '');
+    if (numeric && /^-?\\d+(?:\\.\\d+)?$/.test(numeric)) {
+      return { type: 'number', value: Number(numeric) };
+    }
+    return { type: 'text', value: text.toLocaleLowerCase('es') };
+  }
+
+  document.querySelectorAll('.table-wrap table').forEach(function (table) {
+    var headers = table.querySelectorAll('thead th');
+    var body = table.tBodies[0];
+    if (!body) return;
+
+    headers.forEach(function (header, columnIndex) {
+      header.classList.add('sortable-header');
+      header.setAttribute('role', 'button');
+      header.setAttribute('tabindex', '0');
+      header.setAttribute('title', 'Ordenar ASC/DESC');
+
+      function sortRows() {
+        var direction = header.dataset.sortDirection === 'asc' ? 'desc' : 'asc';
+        headers.forEach(function (other) {
+          delete other.dataset.sortDirection;
+          other.removeAttribute('aria-sort');
+        });
+        header.dataset.sortDirection = direction;
+        header.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
+
+        Array.from(body.rows).sort(function (left, right) {
+          var a = cellValue(left.cells[columnIndex]);
+          var b = cellValue(right.cells[columnIndex]);
+          var result;
+          if (a.type === 'number' && b.type === 'number') {
+            result = a.value - b.value;
+          } else {
+            result = a.value.localeCompare(b.value, 'es', { numeric: true, sensitivity: 'base' });
+          }
+          return direction === 'asc' ? result : -result;
+        }).forEach(function (row) {
+          body.appendChild(row);
+        });
+      }
+
+      header.addEventListener('click', sortRows);
+      header.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          sortRows();
+        }
+      });
+    });
+  });
+})();
+</script>
+"""
+
 
 def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def esc_text(value: object) -> str:
+  escaped = esc(value)
+  return re.sub(r"(?<!Res)\.(?=\s|$)", ".<br>", escaped)
 
 
 def parse_int(value: str | None) -> int | None:
@@ -80,6 +164,44 @@ def period_label(month: int | None, year: int | None) -> str:
     if year:
         return str(year)
     return ""
+
+
+def receipt_pdf_filename(receipt) -> str:
+    month = MONTHS[receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])]
+    year = receipt["period_year"] or int(receipt["issued_date"][:4])
+    month_year = f"{month}{year}"
+    if receipt["direction"] == "INGRESO" and receipt["frequency"] == "MENSUAL":
+        house_number = receipt["house_number"]
+        house_suffix = f"_CasaNo_{house_number}" if house_number else ""
+        base_name = f"{receipt['receipt_no']}{house_suffix}_{month_year}"
+    else:
+        concept = unicodedata.normalize("NFKD", receipt["concept_name"] or "")
+        concept = "".join(char for char in concept if not unicodedata.combining(char))
+        concept = re.sub(r"[^a-zA-Z0-9]+", "_", concept).strip("_").lower()
+        base_name = f"{concept or 'servicio'}_pagado_{month_year}"
+    return f"{base_name}.pdf"
+
+
+def receipt_concept_text(movement) -> str:
+    concept_name = str(movement["concept_name"] or "").strip()
+    normalized_name = concept_name.casefold()
+    annual_concepts = {
+        "vacaciones": "Pago de vacaciones.",
+        "bono 14": "Pago de Bono 14.",
+        "aguinaldo": "Pago de Aguinaldo.",
+    }
+    if movement["frequency"] == "ANUAL":
+      return annual_concepts.get(
+        normalized_name,
+        f"Pago anual de {concept_name}.",
+      )
+
+    if movement["direction"] == "INGRESO":
+      property_notes = str(movement["property_notes"] or "").strip()
+      return property_notes or "Pago de mantenimiento y seguridad."
+
+    description = str(movement["description"] or "").strip()
+    return description or concept_name
 
 
 def amount_to_words(cents: int) -> str:
@@ -184,6 +306,8 @@ def page(title: str, body: str, active: str = "/") -> str:
         ("/employees", "Empleados"),
         ("/concepts", "Conceptos"),
         ("/movements", "Movimientos"),
+        ("/accounts", "Cuenta corriente"),
+        ("/reports", "Reportes"),
         ("/cash-settings", "Saldo inicial"),
         ("/cashflow", "Flujo de caja"),
         ("/receipts", "Recibos"),
@@ -209,6 +333,7 @@ def page(title: str, body: str, active: str = "/") -> str:
     <nav>{nav}</nav>
   </header>
   <main class="shell">{body}</main>
+  {TABLE_SORT_SCRIPT}
 </body>
 </html>"""
 
@@ -221,6 +346,115 @@ def notice(query: dict[str, list[str]]) -> str:
 
 def selected_attr(value: object, current: object) -> str:
     return " selected" if str(value) == str(current) else ""
+
+
+def add_movement_log(conn, movement_id: int, action: str, details: str, created_by: str = CURRENT_USER) -> None:
+    conn.execute(
+        """
+        INSERT INTO movement_logs (movement_id, action, details, created_by)
+        VALUES (?, ?, ?, ?)
+        """,
+        (movement_id, action, details, created_by),
+    )
+
+
+def save_movement_attachment(conn, movement_id: int, uploaded_file, created_by: str = CURRENT_USER):
+    if uploaded_file is None or not getattr(uploaded_file, "filename", None):
+        return None
+
+    filename = Path(getattr(uploaded_file, "filename", "document")).name
+    if not filename:
+        raise ValueError("El archivo adjunto no tiene nombre valido.")
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_ATTACHMENT_EXTENSIONS:
+        raise ValueError("Formato no permitido. Usa JPG, JPEG, PNG, WEBP o PDF.")
+
+    content_type = getattr(uploaded_file, "type", "") or mimetypes.guess_type(filename)[0] or ""
+    if content_type and content_type.lower() not in {value.lower() for value in ALLOWED_ATTACHMENT_TYPES}:
+        raise ValueError("El tipo de archivo no es valido para evidencia documental.")
+
+    ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{movement_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}{suffix}"
+    local_path = ATTACHMENT_DIR / stored_name
+
+    content = uploaded_file.file.read()
+    if not content:
+        raise ValueError("El archivo adjunto no tiene contenido.")
+    local_path.write_bytes(content)
+
+    cursor = conn.execute(
+        """
+        INSERT INTO movement_attachments (
+            movement_id,
+            original_name,
+            stored_name,
+            content_type,
+            file_size,
+            local_path,
+            created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            movement_id,
+            filename,
+            stored_name,
+            content_type,
+            len(content),
+            str(local_path),
+            created_by,
+        ),
+    )
+    add_movement_log(conn, movement_id, "ATTACHMENT_ADDED", f"Adjunto '{filename}' guardado como evidencia.", created_by)
+    return cursor.lastrowid
+
+
+class UploadedFile:
+    def __init__(self, filename: str, content_type: str, data: bytes):
+        self.filename = filename
+        self.type = content_type
+        self.file = io.BytesIO(data)
+
+
+def parse_multipart_form_data(raw: bytes, content_type: str) -> dict[str, object]:
+    match = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', content_type, re.IGNORECASE)
+    if not match:
+        raise ValueError("No se pudo identificar el boundary del formulario multipart.")
+    boundary = (match.group(1) or match.group(2)).strip()
+    boundary_bytes = b"--" + boundary.encode("utf-8")
+    parts = raw.split(boundary_bytes)
+    result: dict[str, object] = {}
+
+    for part in parts[1:-1]:
+        part = part.lstrip(b"\r\n")
+        if not part:
+            continue
+        if part.startswith(b"--"):
+            continue
+        if b"\r\n\r\n" not in part:
+            continue
+        header_block, value = part.split(b"\r\n\r\n", 1)
+        headers = BytesParser(policy=email_default).parsebytes(header_block + b"\r\n")
+        disposition = headers.get("Content-Disposition", "")
+        name_match = re.search(r'name="([^"]+)"', disposition)
+        if not name_match:
+            continue
+        name = name_match.group(1)
+        filename = ""
+        file_match = re.search(r'filename="([^"]*)"', disposition)
+        if file_match:
+            filename = file_match.group(1)
+        value = value.rstrip(b"\r\n")
+        if filename:
+            result[name] = UploadedFile(
+                filename=filename,
+                content_type=headers.get("Content-Type", "application/octet-stream"),
+                data=value,
+            )
+        else:
+            result[name] = value.decode("utf-8", errors="replace")
+    return result
 
 
 def checked_attr(condition: object) -> str:
@@ -392,12 +626,14 @@ def cash_balance(conn, as_of: str | None = None) -> int:
 
 def create_receipt(conn, movement_id: int) -> int:
     movement = conn.execute(
-        """
+        f"""
         SELECT
             m.*,
             c.name AS concept_name,
+            c.frequency AS frequency,
             p.owner_name,
             p.house_number,
+            p.notes AS property_notes,
             e.name AS employee_name
         FROM movements m
         JOIN concepts c ON c.id = m.concept_id
@@ -416,11 +652,8 @@ def create_receipt(conn, movement_id: int) -> int:
         (year,),
     ).fetchone()[0]
     receipt_no = f"R-{year}-{next_sequence:04d}"
-    period = period_label(movement["period_month"], movement["period_year"])
-    description = movement["description"].strip()
-    concept_text = description or movement["concept_name"]
-    if period and period.lower() not in concept_text.lower():
-        concept_text = f"{concept_text}, correspondiente a {period}"
+    receipt_month = movement["period_month"] or int(movement["movement_date"][5:7])
+    concept_text = receipt_concept_text(movement)
 
     if movement["direction"] == "INGRESO":
         payer_name = movement["owner_name"] or movement["counterparty"] or "Pendiente"
@@ -440,6 +673,7 @@ def create_receipt(conn, movement_id: int) -> int:
             receipt_no,
             issued_date,
             direction,
+            receipt_month,
             payer_name,
             receiver_name,
             amount_words,
@@ -448,7 +682,7 @@ def create_receipt(conn, movement_id: int) -> int:
             created_by,
             updated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
         """,
         (
             movement_id,
@@ -457,6 +691,7 @@ def create_receipt(conn, movement_id: int) -> int:
             receipt_no,
             movement["movement_date"],
             movement["direction"],
+            receipt_month,
             payer_name,
             receiver_name,
             amount_to_words(movement["amount_cents"]),
@@ -595,7 +830,7 @@ def render_properties(conn, query) -> str:
           <td>Casa {row['house_number']}</td>
           <td>{esc(row['owner_name'])}</td>
           <td>{status_badge(row['active'], row['is_deleted'])}</td>
-          <td>{esc(row['notes'])}</td>
+          <td>{esc_text(row['notes'])}</td>
           <td>{format_date(row['updated_at'][:10]) if row['updated_at'] else ''}</td>
           <td>
             <div class="actions">
@@ -622,7 +857,7 @@ def render_properties(conn, query) -> str:
             <a class="button primary" href="/properties/new">Nueva propiedad</a>
           </div>
           <div class="table-wrap">
-            <table>
+            <table class="properties-table">
               <thead><tr><th>Casa</th><th>Responsable</th><th>Estado</th><th>Notas</th><th>Actualizado</th><th>Acciones</th></tr></thead>
               <tbody>{rows}</tbody>
             </table>
@@ -704,7 +939,7 @@ def render_employees(conn, query) -> str:
           <td>{esc(row['role'])}</td>
           <td>{format_date(row['start_date'])}</td>
           <td>{status_badge(row['active'], row['is_deleted'])}</td>
-          <td>{esc(row['notes'])}</td>
+          <td>{esc_text(row['notes'])}</td>
           <td>{format_date(row['updated_at'][:10]) if row['updated_at'] else ''}</td>
           <td>
             <div class="actions">
@@ -1079,6 +1314,35 @@ def month_range(start: int | None, end: int | None) -> str:
     return MONTHS[month].capitalize()
 
 
+def calendar_month_options(selected: str = "") -> str:
+    current = date.today().replace(day=1)
+    options = []
+    for offset in range(0, 7):
+        month_start = add_months(current, -offset)
+        value = month_start.strftime("%Y-%m")
+        label = f"{MONTHS[month_start.month].capitalize()} {month_start.year}"
+        options.append(f'<option value="{value}"{selected_attr(value, selected)}>{label}</option>')
+    return "".join(options)
+
+
+def period_from_query(query, default_start: str, default_end: str):
+    selected_month = query.get("month", [""])[0]
+    if selected_month:
+        try:
+            month_start = datetime.strptime(selected_month, "%Y-%m").date().replace(day=1)
+            next_month = add_months(month_start, 1)
+            month_end = next_month - timedelta(days=1)
+            if month_start <= date.today().replace(day=1) and month_start >= add_months(date.today().replace(day=1), -6):
+                return month_start.isoformat(), month_end.isoformat(), selected_month
+        except ValueError:
+            pass
+    return (
+        query.get("from", [default_start])[0],
+        query.get("to", [default_end])[0],
+        "",
+    )
+
+
 def render_movements(conn, query) -> str:
     concepts = conn.execute(
         "SELECT * FROM concepts WHERE active = 1 AND is_deleted = 0 ORDER BY direction, name"
@@ -1089,8 +1353,15 @@ def render_movements(conn, query) -> str:
     employees = conn.execute(
         "SELECT * FROM employees WHERE active = 1 AND is_deleted = 0 ORDER BY name"
     ).fetchall()
+    today = date.today()
+    start, end, selected_month = period_from_query(query, "", "")
+    movement_filter = ""
+    movement_params = []
+    if selected_month:
+        movement_filter = "AND m.movement_date BETWEEN ? AND ?"
+        movement_params = [start, end]
     movements = conn.execute(
-        """
+      f"""
         SELECT
             m.*,
             c.name AS concept_name,
@@ -1105,9 +1376,11 @@ def render_movements(conn, query) -> str:
         LEFT JOIN properties p ON p.id = m.property_id
         LEFT JOIN employees e ON e.id = m.employee_id
         WHERE m.is_deleted = 0
+          {movement_filter}
         ORDER BY m.movement_date DESC, m.id DESC
         LIMIT 60
-        """
+        """,
+        movement_params,
     ).fetchall()
     rows = "".join(movement_row(row, include_balance=False, detail=True) for row in movements)
     if not rows:
@@ -1119,7 +1392,7 @@ def render_movements(conn, query) -> str:
         f"""
         {notice(query)}
         <section class="split">
-          <form class="panel form-panel" method="post" action="/movements">
+          <form class="panel form-panel" method="post" action="/movements" enctype="multipart/form-data">
             <h2>Registrar movimiento</h2>
             <label>Fecha <input name="movement_date" type="date" value="{date.today().isoformat()}" required></label>
             <label>Concepto
@@ -1152,6 +1425,9 @@ def render_movements(conn, query) -> str:
               <label>Referencia <input name="reference" placeholder="Factura, boleta, cheque"></label>
             </div>
             <label>Descripcion <textarea name="description" rows="3" placeholder="Detalle que aparecera en el flujo y, si aplica, en el recibo"></textarea></label>
+            <label>Comprobante / evidencia (opcional)
+              <input type="file" name="attachment" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf">
+            </label>
             <button class="button primary" type="submit">Guardar movimiento</button>
           </form>
 
@@ -1165,6 +1441,15 @@ def render_movements(conn, query) -> str:
 
         <section class="panel">
           <div class="section-head"><h2>Movimientos recientes</h2></div>
+          <form class="filters" method="get" action="/movements">
+            <label>Mes calendario
+              <select name="month">
+                <option value="">Todos los meses</option>
+                {calendar_month_options(selected_month)}
+              </select>
+            </label>
+            <button class="button" type="submit">Filtrar</button>
+          </form>
           <div class="table-wrap">
             <table>
               <thead>
@@ -1221,10 +1506,308 @@ def movement_row(row, include_balance: bool, running_balance: int | None = None,
     """
 
 
+def property_account_totals(conn, property_id: int | None = None, start: str | None = None, end: str | None = None):
+    properties = conn.execute(
+        """
+        SELECT id, house_number, owner_name
+        FROM properties
+        WHERE active = 1 AND is_deleted = 0
+        ORDER BY house_number
+        """
+    ).fetchall()
+
+    result_rows = []
+    for prop in properties:
+        pid = prop["id"]
+        if property_id and pid != property_id:
+            continue
+
+        initial_balance = conn.execute(
+            """
+            SELECT COALESCE(SUM(CASE WHEN direction = 'INGRESO' THEN amount_cents ELSE -amount_cents END), 0)
+            FROM movements
+            WHERE property_id = ?
+              AND is_deleted = 0
+              AND movement_date < ?
+            """,
+            (pid, start or "2000-01-01"),
+        ).fetchone()[0]
+
+        income_total = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount_cents), 0)
+            FROM movements
+            WHERE property_id = ?
+              AND is_deleted = 0
+              AND direction = 'INGRESO'
+              AND movement_date BETWEEN ? AND ?
+            """,
+            (pid, start or "2000-01-01", end or date.today().isoformat()),
+        ).fetchone()[0]
+
+        expense_total = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount_cents), 0)
+            FROM movements
+            WHERE property_id = ?
+              AND is_deleted = 0
+              AND direction = 'EGRESO'
+              AND movement_date BETWEEN ? AND ?
+            """,
+            (pid, start or "2000-01-01", end or date.today().isoformat()),
+        ).fetchone()[0]
+
+        final_balance = initial_balance + income_total - expense_total
+        result_rows.append(
+            {
+                "property_id": pid,
+                "house_number": prop["house_number"],
+                "owner_name": prop["owner_name"],
+                "initial_balance": initial_balance,
+                "income_total": income_total,
+                "expense_total": expense_total,
+                "final_balance": final_balance,
+            }
+        )
+
+    return result_rows
+
+
+def render_account_statement(conn, query) -> str:
+    today = date.today()
+    selected_property = parse_int(query.get("property_id", [""])[0])
+    start, end, selected_month = period_from_query(
+        query,
+        today.replace(day=1).isoformat(),
+        today.isoformat(),
+    )
+    properties = conn.execute(
+        "SELECT id, house_number, owner_name FROM properties WHERE active = 1 AND is_deleted = 0 ORDER BY house_number"
+    ).fetchall()
+    rows = property_account_totals(conn, selected_property, start, end)
+
+    table_rows = "".join(
+        f"""
+        <tr>
+          <td>{esc(row['house_number'])}</td>
+          <td>{esc(row['owner_name'])}</td>
+          <td>{format_money(row['initial_balance'])}</td>
+          <td>{format_money(row['income_total'])}</td>
+          <td>{format_money(row['expense_total'])}</td>
+          <td class="{'positive' if row['final_balance'] >= 0 else 'negative'}">{format_money(row['final_balance'])}</td>
+        </tr>
+        """
+        for row in rows
+    )
+
+    if not table_rows:
+        table_rows = '<tr><td colspan="6" class="muted">No hay datos para este periodo.</td></tr>'
+
+    return page(
+        "Cuenta corriente",
+        f"""
+        <section class="panel">
+          <div class="section-head">
+            <h2>Cuenta corriente por casa/contribuyente</h2>
+          </div>
+          <form class="filters" method="get" action="/accounts">
+            <label>Casa
+              <select name="property_id">
+                <option value="">Todas</option>
+                {''.join(f'<option value="{row["id"]}"{selected_attr(row["id"], selected_property)}>Casa {row["house_number"]} - {row["owner_name"]}</option>' for row in properties)}
+              </select>
+            </label>
+            <label>Mes calendario
+              <select name="month">
+                <option value="">Rango personalizado</option>
+                {calendar_month_options(selected_month)}
+              </select>
+            </label>
+            <label>Desde <input type="date" name="from" value="{esc(start)}"></label>
+            <label>Hasta <input type="date" name="to" value="{esc(end)}"></label>
+            <button class="button primary" type="submit">Filtrar</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Casa</th>
+                  <th>Propietario</th>
+                  <th>Saldo inicial</th>
+                  <th>Ingresos</th>
+                  <th>Egresos</th>
+                  <th>Saldo final</th>
+                </tr>
+              </thead>
+              <tbody>{table_rows}</tbody>
+            </table>
+          </div>
+        </section>
+        """,
+        "/accounts",
+    )
+
+
+def add_months(base: date, months: int) -> date:
+    year = base.year + (base.month - 1 + months) // 12
+    month = (base.month - 1 + months) % 12 + 1
+    day = min(base.day, 28)
+    return date(year, month, day)
+
+
+def period_summary(conn, start: str, end: str, property_id: int | None = None) -> dict[str, int]:
+    prev_day = (datetime.strptime(start, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+    if property_id:
+        opening = conn.execute(
+            """
+            SELECT COALESCE(SUM(CASE WHEN direction = 'INGRESO' THEN amount_cents ELSE -amount_cents END), 0)
+            FROM movements
+            WHERE property_id = ?
+              AND is_deleted = 0
+              AND movement_date < ?
+            """,
+            (property_id, start),
+        ).fetchone()[0]
+    else:
+        opening = cash_balance(conn, prev_day)
+
+    params = [start, end]
+    filters = "AND movement_date BETWEEN ? AND ?"
+    if property_id:
+        filters += " AND property_id = ?"
+        params.append(property_id)
+
+    income = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(amount_cents), 0)
+        FROM movements
+        WHERE is_deleted = 0
+          AND direction = 'INGRESO'
+          {filters}
+        """,
+        params,
+    ).fetchone()[0]
+
+    expense = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(amount_cents), 0)
+        FROM movements
+        WHERE is_deleted = 0
+          AND direction = 'EGRESO'
+          {filters}
+        """,
+        params,
+    ).fetchone()[0]
+
+    final = opening + income - expense
+    return {
+        "opening": opening,
+        "income": income,
+        "expense": expense,
+        "final": final,
+    }
+
+
+def render_reports(conn, query) -> str:
+    today = date.today()
+    property_id = parse_int(query.get("property_id", [""])[0])
+    start, end, selected_month = period_from_query(
+        query,
+        today.replace(day=1).isoformat(),
+        today.isoformat(),
+    )
+    properties = conn.execute(
+        "SELECT id, house_number, owner_name FROM properties WHERE active = 1 AND is_deleted = 0 ORDER BY house_number"
+    ).fetchall()
+
+    summary = period_summary(conn, start, end, property_id)
+    month_cursor = date.today().replace(day=1)
+    comparison = []
+    for offset in range(5, -1, -1):
+        month_start = add_months(month_cursor, -offset)
+        month_end = add_months(month_start.replace(day=1), 1)
+        month_end = date(month_end.year, month_end.month, 1) - timedelta(days=1)
+        current = period_summary(conn, month_start.isoformat(), month_end.isoformat(), property_id)
+        comparison.append({
+            "label": month_start.strftime("%b %Y").replace(".", ""),
+            "start": month_start.isoformat(),
+            "end": month_end.isoformat(),
+            "income": current["income"],
+            "expense": current["expense"],
+            "final": current["final"],
+        })
+
+    comparison_rows = "".join(
+        f"""
+        <tr>
+          <td>{esc(item['label'])}</td>
+          <td>{format_money(item['income'])}</td>
+          <td>{format_money(item['expense'])}</td>
+          <td>{format_money(item['final'])}</td>
+        </tr>
+        """
+        for item in comparison
+    )
+
+    return page(
+        "Reportes",
+        f"""
+        <section class="panel">
+          <div class="section-head">
+            <h2>Reportes financieros</h2>
+          </div>
+          <form class="filters" method="get" action="/reports">
+            <label>Casa
+              <select name="property_id">
+                <option value="">Todas</option>
+                {''.join(f'<option value="{row["id"]}"{selected_attr(row["id"], property_id)}>Casa {row["house_number"]} - {row["owner_name"]}</option>' for row in properties)}
+              </select>
+            </label>
+            <label>Mes calendario
+              <select name="month">
+                <option value="">Rango personalizado</option>
+                {calendar_month_options(selected_month)}
+              </select>
+            </label>
+            <label>Desde <input type="date" name="from" value="{esc(start)}"></label>
+            <label>Hasta <input type="date" name="to" value="{esc(end)}"></label>
+            <button class="button primary" type="submit">Filtrar</button>
+          </form>
+
+          <section class="summary-grid compact">
+            <article class="metric"><span>Saldo inicial</span><strong>{format_money(summary['opening'])}</strong></article>
+            <article class="metric"><span>Ingresos</span><strong class="positive">{format_money(summary['income'])}</strong></article>
+            <article class="metric"><span>Egresos</span><strong class="negative">{format_money(summary['expense'])}</strong></article>
+            <article class="metric"><span>Saldo final</span><strong class="{'positive' if summary['final'] >= 0 else 'negative'}">{format_money(summary['final'])}</strong></article>
+          </section>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Mes</th>
+                  <th>Ingresos</th>
+                  <th>Egresos</th>
+                  <th>Saldo final</th>
+                </tr>
+              </thead>
+              <tbody>{comparison_rows}</tbody>
+            </table>
+          </div>
+        </section>
+        """,
+        "/reports",
+    )
+
+
 def render_cashflow(conn, query) -> str:
     today = date.today()
-    start = query.get("from", [today.replace(month=1, day=1).isoformat()])[0]
-    end = query.get("to", [today.isoformat()])[0]
+    start, end, selected_month = period_from_query(
+        query,
+        today.replace(month=1, day=1).isoformat(),
+        today.isoformat(),
+    )
     settings = get_cash_settings(conn)
     opening_date = settings["opening_balance_date"]
     previous_day = (datetime.strptime(start, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
@@ -1266,7 +1849,7 @@ def render_cashflow(conn, query) -> str:
           <td>-</td>
           <td>-</td>
           <td>{format_money(running)}</td>
-          <td>{esc(settings['notes'])}</td>
+          <td>{esc_text(settings['notes'])}</td>
           <td><span class="muted">No aplica</span></td>
         </tr>
         """
@@ -1310,6 +1893,12 @@ def render_cashflow(conn, query) -> str:
             <a href="/cashflow.csv?{params}">Exportar CSV</a>
           </div>
           <form class="filters" method="get" action="/cashflow">
+            <label>Mes calendario
+              <select name="month">
+                <option value="">Rango personalizado</option>
+                {calendar_month_options(selected_month)}
+              </select>
+            </label>
             <label>Desde <input type="date" name="from" value="{esc(start)}"></label>
             <label>Hasta <input type="date" name="to" value="{esc(end)}"></label>
             <button class="button" type="submit">Filtrar</button>
@@ -1463,17 +2052,26 @@ def render_cash_settings(conn, query) -> str:
 
 
 def render_receipts(conn, query) -> str:
+    today = date.today()
+    start, end, selected_month = period_from_query(query, "", "")
+    receipt_filter = ""
+    receipt_params = []
+    if selected_month:
+        receipt_filter = "AND r.issued_date BETWEEN ? AND ?"
+        receipt_params = [start, end]
     rows = conn.execute(
-        """
+        f"""
         SELECT r.*, m.amount_cents, c.name AS concept_name
         FROM receipts r
         JOIN movements m ON m.id = r.movement_id
         JOIN concepts c ON c.id = m.concept_id
         WHERE r.is_deleted = 0
           AND m.is_deleted = 0
+          {receipt_filter}
         ORDER BY r.issued_date DESC, r.sequence DESC
         LIMIT 100
-        """
+        """,
+        receipt_params,
     ).fetchall()
     table_rows = "".join(
         f"""
@@ -1496,6 +2094,15 @@ def render_receipts(conn, query) -> str:
         f"""
         <section class="panel">
           <div class="section-head"><h2>Recibos generados</h2></div>
+          <form class="filters" method="get" action="/receipts">
+            <label>Mes calendario
+              <select name="month">
+                <option value="">Todos los meses</option>
+                {calendar_month_options(selected_month)}
+              </select>
+            </label>
+            <button class="button" type="submit">Filtrar</button>
+          </form>
           <div class="table-wrap">
             <table>
               <thead><tr><th>No.</th><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Recibi de</th><th>Recibido por</th><th>Monto</th></tr></thead>
@@ -1518,10 +2125,15 @@ def render_receipt(conn, receipt_id: int) -> str:
             m.period_year,
             m.payment_method,
             m.reference,
-            c.name AS concept_name
+            m.description,
+            p.house_number,
+            p.notes AS property_notes,
+            c.name AS concept_name,
+            c.frequency AS frequency
         FROM receipts r
         JOIN movements m ON m.id = r.movement_id
         JOIN concepts c ON c.id = m.concept_id
+          LEFT JOIN properties p ON p.id = m.property_id
         WHERE r.id = ?
           AND r.is_deleted = 0
           AND m.is_deleted = 0
@@ -1534,21 +2146,36 @@ def render_receipt(conn, receipt_id: int) -> str:
     title = "Recibo de ingreso" if receipt["direction"] == "INGRESO" else "Comprobante de egreso"
     counterpart_label = "Recibi de" if receipt["direction"] == "INGRESO" else "Pagado a"
     counterpart_value = receipt["payer_name"] if receipt["direction"] == "INGRESO" else receipt["receiver_name"]
-    period = period_label(receipt["period_month"], receipt["period_year"])
+    receipt_month = receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])
+    receipt_year = receipt["period_year"] or int(receipt["issued_date"][:4])
+    period = f"Mes de {MONTHS[receipt_month].title()} Año {receipt_year}"
+    concept_text = receipt_concept_text(receipt)
+    pdf_filename = receipt_pdf_filename(receipt)
+    month_options = "".join(
+      f'<option value="{month}"{selected_attr(month, receipt_month)}>{esc(name.title())}</option>'
+      for month, name in MONTHS.items()
+    )
     return f"""<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{esc(receipt['receipt_no'])} - {APP_NAME}</title>
+  <title>{esc(pdf_filename)}</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body class="print-body">
   <main class="receipt-shell">
     <div class="receipt-actions">
       <a class="button" href="/receipts">Volver</a>
-      <button class="button primary" onclick="window.print()">Imprimir / Guardar PDF</button>
+      <button class="button primary" onclick="window.print()">Guardar {esc(pdf_filename)}</button>
     </div>
+    <form class="receipt-preview-controls" method="post" action="/receipt/update">
+      <input type="hidden" name="receipt_id" value="{receipt_id}">
+      <label>Mes aplicado al recibo
+        <select name="receipt_month" onchange="this.form.submit()">{month_options}</select>
+      </label>
+      <span class="muted">La vista se actualiza al seleccionar el mes.</span>
+    </form>
     <article class="receipt">
       <header>
         <div>
@@ -1560,6 +2187,7 @@ def render_receipt(conn, receipt_id: int) -> str:
           <strong>{esc(receipt['receipt_no'])}</strong>
         </div>
       </header>
+      <div class="receipt-status">CANCELADO</div>
 
       <section class="receipt-grid">
         <label>Lugar <strong>{esc(receipt['place'])}</strong></label>
@@ -1570,8 +2198,8 @@ def render_receipt(conn, receipt_id: int) -> str:
       <section class="receipt-lines">
         <p><span>{counterpart_label}:</span> {esc(counterpart_value)}</p>
         <p><span>La cantidad de:</span> {esc(receipt['amount_words'])}</p>
-        <p><span>Por concepto de:</span> {esc(receipt['concept_text'])}</p>
-        <p><span>Periodo:</span> {esc(period or 'No aplica')}</p>
+        <p><span>Por concepto de:</span> {esc_text(concept_text)}</p>
+        <p><span>Periodo:</span> {esc(period)}</p>
         <p><span>Referencia:</span> {esc(receipt['reference'] or 'No aplica')}</p>
       </section>
 
@@ -1631,6 +2259,10 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.send_html(render_rate_form(conn, parse_int(query.get("id", [""])[0])))
                 elif parsed.path == "/movements":
                     self.send_html(render_movements(conn, query))
+                elif parsed.path == "/accounts":
+                    self.send_html(render_account_statement(conn, query))
+                elif parsed.path == "/reports":
+                    self.send_html(render_reports(conn, query))
                 elif parsed.path == "/cash-settings":
                     self.send_html(render_cash_settings(conn, query))
                 elif parsed.path == "/cashflow":
@@ -1699,6 +2331,10 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                         self.redirect(f"/receipt/{receipt_id}")
                     else:
                         self.redirect("/movements?ok=1")
+                elif parsed.path == "/receipt/update":
+                    self.update_receipt(conn, data)
+                    receipt_id = parse_int(data.get("receipt_id"))
+                    self.redirect(f"/receipt/{receipt_id}")
                 else:
                     body, status = error_page("Ruta no encontrada.", 404)
                     self.send_html(body, status)
@@ -1706,10 +2342,32 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             body, status = error_page(str(exc), 400)
             self.send_html(body, status)
 
-    def read_form(self) -> dict[str, str]:
+    def update_receipt(self, conn, data) -> None:
+        receipt_id = parse_int(data.get("receipt_id"))
+        receipt_month = parse_int(data.get("receipt_month"))
+        if not receipt_id or not receipt_month or not 1 <= receipt_month <= 12:
+            raise ValueError("Debe seleccionar un mes valido para el recibo.")
+        updated = conn.execute(
+            """
+            UPDATE receipts
+            SET receipt_month = ?, updated_at = CURRENT_TIMESTAMP, updated_by = ?
+            WHERE id = ? AND is_deleted = 0
+            """,
+            (receipt_month, CURRENT_USER, receipt_id),
+        ).rowcount
+        if not updated:
+            raise ValueError("Recibo no encontrado.")
+
+    def read_form(self) -> dict[str, object]:
         length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8")
-        parsed = parse_qs(raw, keep_blank_values=True)
+        raw = self.rfile.read(length)
+        content_type = self.headers.get("Content-Type", "")
+
+        if content_type.startswith("multipart/form-data"):
+            return parse_multipart_form_data(raw, content_type)
+
+        decoded = raw.decode("utf-8")
+        parsed = parse_qs(decoded, keep_blank_values=True)
         return {key: values[0].strip() for key, values in parsed.items()}
 
     def add_property(self, conn, data) -> None:
@@ -2020,7 +2678,11 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         else:
             rate = current_rate(conn, concept_id, employee_id, movement_date)
             if not rate:
-                raise ValueError("No se encontro una vigencia activa para calcular el monto.")
+              raise ValueError(
+                f"El concepto '{concept['name']}' no tiene una vigencia activa para "
+                "esa fecha. Seleccione Cuota ordinaria residencial para registrar "
+                "el pago mensual o ingrese el monto manualmente para un servicio variable."
+              )
             amount_cents = rate["amount_cents"]
         cursor = conn.execute(
             """
@@ -2061,6 +2723,12 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             ),
         )
         movement_id = int(cursor.lastrowid)
+        add_movement_log(conn, movement_id, "CREATED", f"Movimiento registrado: {concept['name']}.", CURRENT_USER)
+
+        attachment = data.get("attachment")
+        if attachment is not None and hasattr(attachment, "filename"):
+            save_movement_attachment(conn, movement_id, attachment, CURRENT_USER)
+
         if concept["requires_receipt"]:
             return create_receipt(conn, movement_id)
         return None

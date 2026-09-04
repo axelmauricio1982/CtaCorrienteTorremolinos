@@ -103,6 +103,38 @@ CREATE INDEX IF NOT EXISTS idx_movements_date ON movements(movement_date, id);
 CREATE INDEX IF NOT EXISTS idx_movements_property ON movements(property_id);
 CREATE INDEX IF NOT EXISTS idx_movements_employee ON movements(employee_id);
 
+CREATE TABLE IF NOT EXISTS movement_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    movement_id INTEGER NOT NULL,
+    original_name TEXT NOT NULL,
+    stored_name TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0 CHECK (file_size >= 0),
+    local_path TEXT NOT NULL DEFAULT '',
+    remote_url TEXT NOT NULL DEFAULT '',
+    uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT NOT NULL DEFAULT 'ADM' CHECK (length(created_by) <= 5),
+    FOREIGN KEY (movement_id) REFERENCES movements(id),
+    CHECK (length(original_name) > 0),
+    CHECK (length(stored_name) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movement_attachments_movement
+ON movement_attachments(movement_id, uploaded_at);
+
+CREATE TABLE IF NOT EXISTS movement_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    movement_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('CREATED', 'UPDATED', 'DELETED', 'ATTACHMENT_ADDED', 'COMMENTED', 'SYNCED')),
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT NOT NULL DEFAULT 'ADM' CHECK (length(created_by) <= 5),
+    FOREIGN KEY (movement_id) REFERENCES movements(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movement_logs_movement
+ON movement_logs(movement_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS receipts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     movement_id INTEGER NOT NULL UNIQUE,
@@ -112,6 +144,7 @@ CREATE TABLE IF NOT EXISTS receipts (
     place TEXT NOT NULL DEFAULT 'Guatemala',
     issued_date TEXT NOT NULL,
     direction TEXT NOT NULL CHECK (direction IN ('INGRESO', 'EGRESO')),
+    receipt_month INTEGER CHECK (receipt_month BETWEEN 1 AND 12),
     payer_name TEXT NOT NULL,
     receiver_name TEXT NOT NULL,
     amount_words TEXT NOT NULL,
@@ -285,6 +318,13 @@ def init_db(db_path: str | Path) -> None:
 
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
+    existing_tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+
     add_column_if_missing(conn, "employees", "start_date", "TEXT NOT NULL DEFAULT ''")
 
     for table in (
@@ -296,11 +336,16 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "receipts",
         "cash_settings",
     ):
+        if table not in existing_tables:
+            continue
+
         add_column_if_missing(conn, table, "active", "INTEGER NOT NULL DEFAULT 1")
         add_column_if_missing(conn, table, "is_deleted", "INTEGER NOT NULL DEFAULT 0")
         add_column_if_missing(conn, table, "updated_at", "TEXT NOT NULL DEFAULT ''")
         add_column_if_missing(conn, table, "created_by", "TEXT NOT NULL DEFAULT 'ADM'")
         add_column_if_missing(conn, table, "updated_by", "TEXT NOT NULL DEFAULT 'ADM'")
+        if table == "receipts":
+            add_column_if_missing(conn, table, "receipt_month", "INTEGER")
         conn.execute(
             f"""
             UPDATE {table}
@@ -310,6 +355,15 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
                 updated_by = COALESCE(NULLIF(updated_by, ''), 'ADM')
             """
         )
+
+    for table in ("movement_attachments", "movement_logs"):
+        if table not in existing_tables:
+            continue
+        if "created_by" not in {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }:
+            add_column_if_missing(conn, table, "created_by", "TEXT NOT NULL DEFAULT 'ADM'")
 
 
 def add_column_if_missing(
