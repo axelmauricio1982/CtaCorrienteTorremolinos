@@ -1,58 +1,93 @@
-# Residencial Torremolinos
+# CtaCorrienteTorremolinos
 
-Sistema local para gestionar ingresos, egresos, conceptos de pago, vigencias, flujo de caja y recibos del residencial.
+Sistema de gestión para un residencial, pensado para controlar ingresos, egresos, conceptos de cobro, vigencias, flujo de caja y recibos.
+
+## Descripción
+
+Esta aplicación permite llevar la contabilidad operativa del residencial de forma local, con una base de datos SQLite y una interfaz web simple desarrollada en Python.
+
+Incluye funcionalidades para:
+
+- Registrar propiedades
+- Administrar empleados
+- Definir conceptos de ingreso y egreso
+- Configurar vigencias y montos fijos
+- Controlar movimientos de caja
+- Visualizar flujo de caja con saldo acumulado
+- Generar recibos imprimibles
+- Exportar información en CSV
 
 ## Requisitos
 
 - Python 3.10 o superior
-- No requiere instalar librerias externas para la primera version
+- No requiere dependencias externas adicionales para esta versión inicial
 
-## Ejecutar
+## Ejecutar el proyecto
 
 ```bash
 python3 app.py
 ```
 
-Luego abrir:
+Luego abre esta dirección en el navegador:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-En Windows normalmente se puede usar:
+En Windows puedes usar:
 
 ```bash
 python app.py
 ```
 
-## Datos
+## Estructura del proyecto
 
-La base de datos se crea automaticamente en:
+```text
+.
+├── app.py
+├── README.md
+├── .gitignore
+├── data/
+│   └── torremolinos.sqlite3
+├── static/
+│   └── styles.css
+└── torremolinos/
+    ├── __init__.py
+    └── db.py
+```
+
+## Base de datos
+
+La base de datos se crea automáticamente en:
 
 ```text
 data/torremolinos.sqlite3
 ```
 
-Ese archivo es el que se debe respaldar. Contiene propiedades, empleados, conceptos, vigencias, movimientos y recibos.
+Ese archivo debe respaldarse periódicamente porque almacena propiedades, empleados, conceptos, vigencias, movimientos, recibos y el saldo del flujo de caja.
 
 ## Alcance inicial
 
-- Catalogo de propiedades
+- Catálogo de propiedades
 - CRUD de propiedades
 - CRUD de empleados con fecha de inicio laboral
-- CRUD de conceptos de ingreso/egreso
+- CRUD de conceptos de ingreso y egreso
 - CRUD de vigencias de montos fijos
-- Listados de catalogos con paginacion y pantallas separadas de edicion
-- Borrado logico mediante `active` e `is_deleted`
-- Auditoria basica con `created_at`, `updated_at`, `created_by` y `updated_by`
-- Saldo inicial de ahorros para arrancar el flujo de caja con dinero disponible previo
+- Listados con paginación
+- Eliminado lógico con campos `active` e `is_deleted`
+- Auditoría básica con `created_at`, `updated_at`, `created_by` y `updated_by`
+- Saldo inicial de ahorros para iniciar flujo de caja
 - Registro de movimientos de caja
 - Flujo de caja con saldo acumulado
-- Recibos imprimibles para conceptos que requieren recibo
-- Exportacion CSV del flujo de caja
+- Recibos imprimibles
+- Exportación CSV del flujo de caja
 
 ## Modelo de datos
 
-La base SQLite usa tablas relacionales con llaves primarias (`PRIMARY KEY`), llaves foraneas (`FOREIGN KEY`) y restricciones `CHECK` para tipos, estados, montos y rangos de fechas/periodos. La aplicacion habilita `PRAGMA foreign_keys = ON` en cada conexion.
+La base SQLite utiliza tablas relacionales con claves primarias, claves foráneas y restricciones para validar tipos, estados, montos y rangos de fechas. La aplicación activa `PRAGMA foreign_keys = ON` en cada conexión.
 
-Los catalogos usan borrado logico para proteger el historico: al eliminar un registro se marca como inactivo y eliminado, pero no se borra fisicamente de las tablas operativas.
+Los catálogos usan borrado lógico para proteger el historial: en vez de eliminar físicamente el registro, se marca como inactivo y eliminado.
+
+## Estado del proyecto
+
+Es una versión funcional local, lista para continuar con mejoras y ampliaciones según las necesidades del residencial.
