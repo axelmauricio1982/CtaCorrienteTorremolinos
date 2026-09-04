@@ -136,6 +136,27 @@ nav a:hover {
   color: var(--expense);
 }
 
+.sync-panel {
+  padding: 16px;
+}
+
+.sync-panel h2,
+.sync-panel p {
+  margin: 0;
+}
+
+.sync-panel p {
+  margin-top: 5px;
+}
+
+.sync-actions {
+  margin: 0;
+}
+
+.sync-actions form {
+  margin: 0;
+}
+
 .report-opening {
   color: var(--text);
 }

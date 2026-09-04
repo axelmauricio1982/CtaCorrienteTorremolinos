@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
@@ -418,9 +419,53 @@ def page(title: str, body: str, active: str = "/") -> str:
 
 
 def notice(query: dict[str, list[str]]) -> str:
+  sync_message = query.get("sync_message", [""])[0]
+  if sync_message:
+    return f'<div class="notice">{esc(sync_message)}</div>'
     if "ok" not in query:
         return ""
     return '<div class="notice">Operacion registrada correctamente.</div>'
+
+
+def git_sync(action: str) -> str:
+  if action == "pull":
+    command = ["git", "pull", "--ff-only", "origin", "main"]
+    success_message = "Pull completado. Los datos y el codigo local estan actualizados."
+  elif action == "push":
+    subprocess.run(
+      ["git", "add", "-f", "data/torremolinos.sqlite3", "data/attachments"],
+      cwd=BASE_DIR,
+      check=True,
+      capture_output=True,
+      text=True,
+    )
+    staged = subprocess.run(
+      ["git", "diff", "--cached", "--quiet", "--", "data/torremolinos.sqlite3", "data/attachments"],
+      cwd=BASE_DIR,
+      check=False,
+    )
+    if staged.returncode == 0:
+      return "Push no necesario. No hay cambios nuevos en los datos."
+    subprocess.run(
+      ["git", "commit", "--only", "-m", "Sync application data and evidence", "--", "data/torremolinos.sqlite3", "data/attachments"],
+      cwd=BASE_DIR,
+      check=True,
+      capture_output=True,
+      text=True,
+    )
+    command = ["git", "push", "origin", "main"]
+    success_message = "Push completado. Los datos ya estan publicados en GitHub."
+  else:
+    raise ValueError("Operacion de sincronizacion no valida.")
+
+  try:
+    subprocess.run(command, cwd=BASE_DIR, check=True, capture_output=True, text=True, timeout=60)
+  except subprocess.CalledProcessError as error:
+    detail = (error.stderr or error.stdout or "Git devolvio un error.").strip().splitlines()[-1]
+    raise ValueError(f"No se pudo completar {action}: {detail}") from error
+  except subprocess.TimeoutExpired as error:
+    raise ValueError(f"La operacion {action} excedio el tiempo limite de 60 segundos.") from error
+  return success_message
 
 
 def selected_attr(value: object, current: object) -> str:
@@ -888,6 +933,16 @@ def render_dashboard(conn, query) -> str:
           <a class="button" href="/cashflow">Ver flujo de caja</a>
           <a class="button" href="/cash-settings">Configurar saldo inicial</a>
           <a class="button" href="/concepts">Administrar vigencias</a>
+        </section>
+
+        <section class="panel sync-panel">
+          <div class="section-head">
+            <div><h2>Sincronizacion con GitHub</h2><p class="muted">Comparte la base de datos y las evidencias entre tus equipos.</p></div>
+            <div class="toolbar sync-actions">
+              <form method="post" action="/sync"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull desde GitHub</button></form>
+              <form method="post" action="/sync" onsubmit="return confirm('Se publicara la base de datos y las evidencias actuales en GitHub. ¿Continuar?');"><input type="hidden" name="action" value="push"><button class="button primary" type="submit">Push a GitHub</button></form>
+            </div>
+          </div>
         </section>
 
         <section class="panel">
@@ -2515,6 +2570,10 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         data = self.read_form()
         try:
+            if parsed.path == "/sync":
+                message = git_sync(data.get("action", ""))
+                self.redirect(f"/?{urlencode({'sync_message': message})}")
+                return
             with connect(self.db_path) as conn:
                 if parsed.path == "/properties":
                     self.add_property(conn, data)
