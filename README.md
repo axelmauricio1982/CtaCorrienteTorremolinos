@@ -44,7 +44,18 @@ http://127.0.0.1:8000
 
 ## OneDrive Personal
 
-La aplicación conserva cada comprobante en `data/attachments/` y también lo copia automáticamente a la carpeta sincronizada de OneDrive:
+La aplicación conserva cada comprobante en `data/attachments/` y puede cargarlo directamente a OneDrive Personal mediante Microsoft Graph. La aplicación registrada usa:
+
+```text
+Client ID: 783c3d89-46d0-4280-b8b9-0fdfcd88aab1
+Permiso: Files.ReadWrite.AppFolder
+```
+
+Este permiso limita el acceso a la carpeta privada de `CtaCorrienteTorremolinos`. La contraseña nunca se entrega a la aplicación: el acceso se autoriza con el flujo de código de dispositivo de Microsoft. El token se guarda únicamente en `.onedrive-token-cache.json`, con permisos locales restringidos, y ese archivo está excluido de Git.
+
+Después de instalar las dependencias e iniciar el servidor, abre **Inicio > Configurar OneDrive > Conectar OneDrive Personal**. Microsoft mostrará un código y solicitará el consentimiento la primera vez.
+
+Como compatibilidad adicional, si existe un cliente de OneDrive instalado, la aplicación también puede copiar el archivo a la carpeta sincronizada:
 
 ```text
 /Users/axll/OneDrive/Torremolinos/Evidencias
@@ -66,16 +77,16 @@ $env:ONEDRIVE_LOCAL_FOLDER = "$HOME\OneDrive"
 python app.py
 ```
 
-No se necesitan Microsoft Entra, Client ID, contraseñas ni tokens. Si OneDrive no está disponible, el comprobante permanece guardado localmente y queda registrado para revisión.
+Si no hay conexión ni carpeta local disponible, el comprobante permanece guardado localmente y queda marcado como pendiente. En el siguiente **Push de datos**, la aplicación reintenta primero la carga directa a OneDrive y solamente después respalda la base y las evidencias en GitHub.
 
 ## Sincronización de datos con GitHub
 
 Los botones de sincronización utilizan la rama independiente `data-sync` para mantener los datos separados del código fuente:
 
-- **Push de datos:** vuelve a intentar la copia a OneDrive de las evidencias pendientes y publica en GitHub solamente `data/torremolinos.sqlite3` y `data/attachments/`.
+- **Push de datos:** vuelve a intentar la carga directa a OneDrive de las evidencias pendientes y publica en GitHub solamente `data/torremolinos.sqlite3` y `data/attachments/`.
 - **Pull de base de datos:** restaura solamente `data/torremolinos.sqlite3`. No modifica el código fuente ni descarga o elimina evidencias locales.
 
-La aplicación puede comprobar que una evidencia fue copiada a la carpeta local sincronizada de OneDrive. La subida definitiva a la nube es realizada en segundo plano por el cliente de OneDrive.
+Cuando se utiliza Microsoft Graph, la aplicación guarda el identificador remoto y la fecha de sincronización únicamente después de que OneDrive confirma el tamaño completo del archivo. Una copia en la carpeta local de OneDrive se distingue de una carga confirmada en la nube.
 
 En Windows puedes usar:
 

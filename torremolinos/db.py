@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS movement_attachments (
     file_size INTEGER NOT NULL DEFAULT 0 CHECK (file_size >= 0),
     local_path TEXT NOT NULL DEFAULT '',
     remote_url TEXT NOT NULL DEFAULT '',
+    remote_provider TEXT NOT NULL DEFAULT '',
+    remote_item_id TEXT NOT NULL DEFAULT '',
+    remote_synced_at TEXT NOT NULL DEFAULT '',
     uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL DEFAULT 'ADM' CHECK (length(created_by) <= 5),
     FOREIGN KEY (movement_id) REFERENCES movements(id),
@@ -315,6 +318,7 @@ def init_db(db_path: str | Path) -> None:
         seed_concepts(conn)
         seed_initial_rates(conn)
         seed_cash_settings(conn)
+        conn.execute("PRAGMA optimize")
 
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
@@ -364,6 +368,23 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }:
             add_column_if_missing(conn, table, "created_by", "TEXT NOT NULL DEFAULT 'ADM'")
+
+    if "movement_attachments" in existing_tables:
+        add_column_if_missing(
+            conn, "movement_attachments", "remote_provider", "TEXT NOT NULL DEFAULT ''"
+        )
+        add_column_if_missing(
+            conn, "movement_attachments", "remote_item_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        add_column_if_missing(
+            conn, "movement_attachments", "remote_synced_at", "TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movement_attachments_remote_sync
+            ON movement_attachments(remote_provider, remote_synced_at)
+            """
+        )
 
 
 def add_column_if_missing(

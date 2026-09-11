@@ -22,6 +22,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from torremolinos.db import connect, init_db
+from torremolinos.onedrive import (
+    CLIENT_ID as ONEDRIVE_CLIENT_ID,
+    OneDriveError,
+    connection_status as onedrive_connection_status,
+    start_device_login,
+    upload_file as upload_file_to_onedrive,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -32,6 +39,7 @@ PAGE_SIZE = 10
 ATTACHMENT_DIR = BASE_DIR / "data" / "attachments"
 ONEDRIVE_LOCAL_FOLDER = Path(os.environ.get("ONEDRIVE_LOCAL_FOLDER", str(Path.home() / "OneDrive")))
 ONEDRIVE_EVIDENCE_DIR = ONEDRIVE_LOCAL_FOLDER / "Torremolinos" / "Evidencias"
+ONEDRIVE_TOKEN_CACHE = BASE_DIR / ".onedrive-token-cache.json"
 SYNC_STATE_FILE = BASE_DIR / ".torremolinos-sync.json"
 DATA_SYNC_BRANCH = "data-sync"
 DATA_SYNC_PATHS = ("data/torremolinos.sqlite3", "data/attachments")
@@ -498,28 +506,41 @@ def fetch_data_sync_branch(required: bool) -> str | None:
   return tracking_ref
 
 
-def sync_pending_evidence_to_onedrive() -> tuple[int, int]:
+def sync_pending_evidence_to_onedrive() -> dict[str, int]:
   with connect(DEFAULT_DB) as conn:
-    attachments = conn.execute(
-      "SELECT id, remote_url FROM movement_attachments ORDER BY id"
+    pending = conn.execute(
+      """
+      SELECT id, movement_id
+      FROM movement_attachments
+      WHERE remote_provider != 'onedrive_graph'
+         OR remote_item_id = ''
+         OR remote_synced_at = ''
+      ORDER BY id
+      """
     ).fetchall()
-    pending = [row for row in attachments if not row["remote_url"] or not Path(row["remote_url"]).is_file()]
-    if not pending or not ONEDRIVE_LOCAL_FOLDER.is_dir():
-      return 0, len(pending)
+    result = {"cloud_synced": 0, "local_copied": 0, "pending": len(pending)}
+    if not pending:
+      return result
 
-    synced = 0
+    graph_connected = bool(onedrive_connection_status(ONEDRIVE_TOKEN_CACHE).get("connected"))
     for attachment in pending:
       try:
-        sync_attachment_to_onedrive_folder(conn, int(attachment["id"]))
-        synced += 1
-      except (OSError, ValueError) as error:
-        row = conn.execute(
-          "SELECT movement_id FROM movement_attachments WHERE id = ?",
-          (attachment["id"],),
-        ).fetchone()
-        if row:
-          add_movement_log(conn, row["movement_id"], "COMMENTED", onedrive_error_message(error), CURRENT_USER)
-    return synced, len(pending) - synced
+        if graph_connected:
+          sync_attachment_to_onedrive_graph(conn, int(attachment["id"]))
+          result["cloud_synced"] += 1
+          result["pending"] -= 1
+        elif ONEDRIVE_LOCAL_FOLDER.is_dir():
+          sync_attachment_to_onedrive_folder(conn, int(attachment["id"]))
+          result["local_copied"] += 1
+      except (OSError, ValueError, OneDriveError) as error:
+        add_movement_log(
+          conn,
+          attachment["movement_id"],
+          "COMMENTED",
+          onedrive_error_message(error),
+          CURRENT_USER,
+        )
+    return result
 
 
 def push_application_data() -> bool:
@@ -581,17 +602,19 @@ def pull_application_database() -> None:
 def git_sync(action: str) -> str:
   try:
     if action == "push":
-      synced, pending = sync_pending_evidence_to_onedrive()
+      evidence = sync_pending_evidence_to_onedrive()
       pushed = push_application_data()
       save_sync_timestamp(action)
       if not pushed:
         message = "Push no necesario. No hay cambios nuevos en la base de datos ni en las evidencias."
       else:
         message = "Push completado. Solo la base de datos y las evidencias se publicaron en GitHub."
-      if synced:
-        message += f" {synced} evidencia(s) pendiente(s) se copiaron a OneDrive."
-      if pending:
-        message += f" {pending} evidencia(s) siguen pendientes de OneDrive; permanecen respaldadas en GitHub."
+      if evidence["cloud_synced"]:
+        message += f" OneDrive confirmo {evidence['cloud_synced']} evidencia(s) nueva(s) en la nube."
+      if evidence["local_copied"]:
+        message += f" {evidence['local_copied']} evidencia(s) se copiaron a la carpeta local de OneDrive."
+      if evidence["pending"]:
+        message += f" {evidence['pending']} evidencia(s) aun no tienen confirmacion de nube; permanecen respaldadas en GitHub."
       return message
     if action == "pull":
       pull_application_database()
@@ -694,7 +717,12 @@ def sync_attachment_to_onedrive_folder(conn, attachment_id: int) -> str:
     shutil.copy2(source, destination)
     remote_path = str(destination)
     conn.execute(
-        "UPDATE movement_attachments SET remote_url = ? WHERE id = ?",
+        """
+        UPDATE movement_attachments
+        SET remote_url = ?, remote_provider = 'onedrive_local',
+            remote_item_id = '', remote_synced_at = ''
+        WHERE id = ?
+        """,
         (remote_path, attachment_id),
     )
     add_movement_log(
@@ -704,6 +732,50 @@ def sync_attachment_to_onedrive_folder(conn, attachment_id: int) -> str:
       f"Evidencia '{attachment['original_name']}' copiada a OneDrive.",
     )
     return remote_path
+
+
+def sync_attachment_to_onedrive_graph(conn, attachment_id: int) -> str:
+    attachment = conn.execute(
+        "SELECT * FROM movement_attachments WHERE id = ?", (attachment_id,)
+    ).fetchone()
+    if not attachment:
+        raise ValueError("Evidencia no encontrada.")
+    source = Path(attachment["local_path"])
+    uploaded = upload_file_to_onedrive(
+        ONEDRIVE_TOKEN_CACHE,
+        source,
+        attachment["stored_name"],
+        attachment["content_type"],
+    )
+    remote_url = str(uploaded["web_url"])
+    conn.execute(
+        """
+        UPDATE movement_attachments
+        SET remote_url = ?, remote_provider = 'onedrive_graph',
+            remote_item_id = ?, remote_synced_at = ?
+        WHERE id = ?
+        """,
+        (remote_url, uploaded["id"], uploaded["synced_at"], attachment_id),
+    )
+    add_movement_log(
+      conn,
+      attachment["movement_id"],
+      "SYNCED",
+      f"OneDrive confirmo la evidencia '{attachment['original_name']}' en la nube.",
+    )
+    return remote_url
+
+
+def sync_attachment_to_onedrive(conn, attachment_id: int) -> str:
+    status = onedrive_connection_status(ONEDRIVE_TOKEN_CACHE)
+    if status.get("connected"):
+        return sync_attachment_to_onedrive_graph(conn, attachment_id)
+    if ONEDRIVE_LOCAL_FOLDER.is_dir():
+        return sync_attachment_to_onedrive_folder(conn, attachment_id)
+    raise OneDriveError(
+        "No hay una sesion de OneDrive ni una carpeta local disponible. "
+        "Conecta OneDrive desde Inicio > Configurar OneDrive."
+    )
 
 
 class UploadedFile:
@@ -999,6 +1071,112 @@ def create_receipt(conn, movement_id: int) -> int:
     return int(cursor.lastrowid)
 
 
+def onedrive_pending_count(conn) -> int:
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM movement_attachments
+            WHERE remote_provider != 'onedrive_graph'
+               OR remote_item_id = ''
+               OR remote_synced_at = ''
+            """
+        ).fetchone()[0]
+    )
+
+
+def render_onedrive_settings(conn, query) -> str:
+    status = onedrive_connection_status(ONEDRIVE_TOKEN_CACHE)
+    pending = onedrive_pending_count(conn)
+    local_available = ONEDRIVE_LOCAL_FOLDER.is_dir()
+    status_name = str(status.get("status", "disconnected"))
+    status_labels = {
+        "connected": "Conectado",
+        "pending": "Esperando inicio de sesion",
+        "dependency_missing": "Instalacion pendiente",
+        "error": "Requiere atencion",
+        "disconnected": "No conectado",
+        "idle": "No conectado",
+    }
+    message = query.get("message", [""])[0]
+    message_html = f'<div class="notice">{esc(message)}</div>' if message else ""
+
+    if status_name == "pending":
+        action_html = f"""
+        <div class="device-login">
+          <p>Abre el sitio de Microsoft e ingresa este codigo:</p>
+          <strong class="device-code">{esc(status.get('user_code', ''))}</strong>
+          <a class="button primary" href="{esc(status.get('verification_uri', 'https://microsoft.com/devicelogin'))}" target="_blank" rel="noopener">Abrir Microsoft</a>
+          <p class="muted">Esta pagina se actualizara cuando Microsoft confirme el acceso.</p>
+        </div>
+        <script>
+        setInterval(function () {{
+          fetch('/onedrive/status').then(function (response) {{ return response.json(); }}).then(function (data) {{
+            if (data.status === 'connected') window.location.href = '/onedrive?message=OneDrive conectado correctamente.';
+            if (data.status === 'error') window.location.reload();
+          }});
+        }}, 2500);
+        </script>
+        """
+    elif status_name == "connected":
+        action_html = f"""
+        <p class="muted">Cuenta: {esc(status.get('username', 'Cuenta personal'))}</p>
+        <form method="post" action="/onedrive/sync">
+          <button class="button primary" type="submit">Sincronizar evidencias pendientes</button>
+        </form>
+        """
+    elif status_name == "dependency_missing":
+        action_html = """
+        <div class="notice warning-notice">Instala las dependencias con <code>python3 -m pip install -r requirements.txt</code> y reinicia la aplicacion.</div>
+        """
+    else:
+        action_html = """
+        <form method="post" action="/onedrive/login">
+          <button class="button primary" type="submit">Conectar OneDrive Personal</button>
+        </form>
+        """
+
+    return page(
+        "OneDrive",
+        f"""
+        {message_html}
+        <section class="panel onedrive-panel">
+          <div class="section-head">
+            <div>
+              <h2>Respaldo seguro en OneDrive</h2>
+              <p class="muted">Las evidencias se guardan primero en este equipo y despues se cargan a una carpeta privada de la aplicacion.</p>
+            </div>
+            <span class="cloud-status {esc(status_name)}">{esc(status_labels.get(status_name, status_name))}</span>
+          </div>
+
+          <div class="onedrive-grid">
+            <article>
+              <span>Evidencias sin confirmacion de nube</span>
+              <strong>{pending}</strong>
+            </article>
+            <article>
+              <span>Carpeta local de OneDrive</span>
+              <strong>{'Disponible' if local_available else 'No disponible'}</strong>
+              <small>{esc(ONEDRIVE_LOCAL_FOLDER)}</small>
+            </article>
+            <article>
+              <span>Permiso utilizado</span>
+              <strong>Solo carpeta de la aplicacion</strong>
+              <small>Files.ReadWrite.AppFolder</small>
+            </article>
+          </div>
+
+          <div class="onedrive-action">
+            <p>{esc(status.get('message', ''))}</p>
+            {action_html}
+          </div>
+          <p class="muted security-note">La aplicacion nunca recibe ni almacena tu contrasena. Microsoft entrega un token local protegido por permisos del sistema.</p>
+        </section>
+        """,
+        "/onedrive",
+    )
+
+
 def render_dashboard(conn, query) -> str:
     today = date.today()
     month_start = today.replace(day=1).isoformat()
@@ -1043,6 +1221,8 @@ def render_dashboard(conn, query) -> str:
     if not rows:
         rows = '<tr><td colspan="7" class="muted">Aun no hay movimientos registrados.</td></tr>'
     synchronization = sync_status()
+    cloud = onedrive_connection_status(ONEDRIVE_TOKEN_CACHE)
+    cloud_pending = onedrive_pending_count(conn)
     selected_chart_months = query.get("chart_month", [])
     if not selected_chart_months:
       selected_chart_months = [add_months(today.replace(day=1), offset).strftime("%Y-%m") for offset in range(-5, 1)]
@@ -1080,6 +1260,7 @@ def render_dashboard(conn, query) -> str:
           <a class="button" href="/cashflow">Ver flujo de caja</a>
           <a class="button" href="/cash-settings">Configurar saldo inicial</a>
           <a class="button" href="/concepts">Administrar vigencias</a>
+          <a class="button" href="/onedrive">Configurar OneDrive</a>
         </section>
 
         <section class="panel sync-panel">
@@ -1093,6 +1274,7 @@ def render_dashboard(conn, query) -> str:
           <div class="sync-history">
             <div><span>Ultimo Push</span><strong>{esc(synchronization['push'])}</strong>{f'<small>Commit {esc(synchronization["push_commit"])}</small>' if synchronization['push_commit'] else ''}</div>
             <div><span>Ultimo Pull</span><strong>{esc(synchronization['pull'])}</strong></div>
+            <div><span>OneDrive</span><strong>{'Conectado' if cloud.get('connected') else 'No conectado'}</strong><small>{cloud_pending} evidencia(s) sin confirmacion de nube</small></div>
           </div>
         </section>
 
@@ -2882,6 +3064,9 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             if parsed.path == "/static/styles.css":
                 self.send_static("styles.css")
                 return
+            if parsed.path == "/onedrive/status":
+                self.send_json(onedrive_connection_status(ONEDRIVE_TOKEN_CACHE))
+                return
             with connect(self.db_path) as conn:
                 if parsed.path == "/":
                     self.send_html(render_dashboard(conn, query))
@@ -2927,6 +3112,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                   self.send_pdf(pdf_bytes, filename)
                 elif parsed.path == "/cash-settings":
                     self.send_html(render_cash_settings(conn, query))
+                elif parsed.path == "/onedrive":
+                    self.send_html(render_onedrive_settings(conn, query))
                 elif parsed.path == "/cashflow":
                     self.send_html(render_cashflow(conn, query))
                 elif parsed.path == "/cashflow.csv":
@@ -2951,6 +3138,18 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         data = self.read_form()
         try:
+            if parsed.path == "/onedrive/login":
+                start_device_login(ONEDRIVE_TOKEN_CACHE)
+                self.redirect("/onedrive")
+                return
+            if parsed.path == "/onedrive/sync":
+                result = sync_pending_evidence_to_onedrive()
+                message = (
+                    f"OneDrive confirmo {result['cloud_synced']} evidencia(s). "
+                    f"Quedan {result['pending']} pendiente(s)."
+                )
+                self.redirect(f"/onedrive?{urlencode({'message': message})}")
+                return
             if parsed.path == "/sync":
                 message = git_sync(data.get("action", ""))
                 self.redirect(f"/?{urlencode({'sync_message': message})}")
@@ -3464,8 +3663,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             attachment_id = save_movement_attachment(conn, movement_id, attachment, CURRENT_USER)
             if attachment_id:
               try:
-                sync_attachment_to_onedrive_folder(conn, int(attachment_id))
-              except OSError as error:
+                sync_attachment_to_onedrive(conn, int(attachment_id))
+              except (OSError, OneDriveError) as error:
                 add_movement_log(conn, movement_id, "COMMENTED", onedrive_error_message(error), CURRENT_USER)
           return self.sync_movement_receipt(conn, movement_id, concept)
 
@@ -3565,8 +3764,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             attachment_id = save_movement_attachment(conn, movement_id, attachment, CURRENT_USER)
             if attachment_id:
                 try:
-                  sync_attachment_to_onedrive_folder(conn, int(attachment_id))
-                except OSError as error:
+                  sync_attachment_to_onedrive(conn, int(attachment_id))
+                except (OSError, OneDriveError) as error:
                   add_movement_log(conn, movement_id, "COMMENTED", onedrive_error_message(error), CURRENT_USER)
 
         if concept["requires_receipt"]:
@@ -3590,6 +3789,15 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         payload = content.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def send_json(self, content: dict[str, object], status: int = 200):
+        payload = json.dumps(content).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

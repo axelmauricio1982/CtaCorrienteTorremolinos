@@ -381,9 +381,107 @@ nav a:hover {
 
 .sync-history {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-top: 14px;
+}
+
+.onedrive-panel {
+  max-width: 980px;
+  margin-inline: auto;
+}
+
+.onedrive-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.onedrive-grid article {
+  min-height: 118px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.onedrive-grid span,
+.onedrive-grid strong,
+.onedrive-grid small {
+  display: block;
+}
+
+.onedrive-grid span,
+.onedrive-grid small {
+  color: var(--muted);
+}
+
+.onedrive-grid strong {
+  margin: 8px 0 5px;
+  font-size: 18px;
+}
+
+.cloud-status {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #f2f2f2;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cloud-status.connected {
+  background: #e8f5ed;
+  color: var(--income);
+}
+
+.cloud-status.pending {
+  background: #fff5dc;
+  color: var(--warning);
+}
+
+.cloud-status.error,
+.cloud-status.dependency_missing {
+  background: #f9ece8;
+  color: var(--expense);
+}
+
+.onedrive-action {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.onedrive-action > p:first-child {
+  margin-top: 0;
+}
+
+.device-login {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.device-code {
+  padding: 10px 14px;
+  border: 1px dashed var(--primary);
+  border-radius: 6px;
+  background: #f7fbfa;
+  color: var(--primary-strong);
+  font-size: 22px;
+  letter-spacing: 0.08em;
+}
+
+.security-note {
+  margin-bottom: 0;
+}
+
+.warning-notice {
+  border-color: #ead49f;
+  background: #fff8e8;
+  color: #6e5118;
 }
 
 .sync-history div {
@@ -409,7 +507,8 @@ nav a:hover {
 }
 
 @media (max-width: 700px) {
-  .sync-history {
+  .sync-history,
+  .onedrive-grid {
     grid-template-columns: 1fr;
   }
 }

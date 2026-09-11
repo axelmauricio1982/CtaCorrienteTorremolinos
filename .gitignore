@@ -19,3 +19,5 @@ data/*.sqlite3-shm
 data/*.sqlite3-wal
 data/attachments/
 .torremolinos-sync.json
+.onedrive-token-cache.json
+.onedrive-token-cache.json.tmp

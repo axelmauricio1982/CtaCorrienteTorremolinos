@@ -56,6 +56,7 @@ class DataSyncTests(unittest.TestCase):
             ATTACHMENT_DIR=self.attachments,
             ONEDRIVE_LOCAL_FOLDER=self.onedrive,
             ONEDRIVE_EVIDENCE_DIR=self.onedrive / "Torremolinos" / "Evidencias",
+            ONEDRIVE_TOKEN_CACHE=self.root / ".onedrive-token-cache.json",
             SYNC_STATE_FILE=self.repository / ".torremolinos-sync.json",
         )
         self.globals_patch.start()
@@ -127,16 +128,61 @@ class DataSyncTests(unittest.TestCase):
                 (movement_id, local_evidence.stat().st_size, str(local_evidence)),
             )
 
-        synced, pending = app.sync_pending_evidence_to_onedrive()
+        result = app.sync_pending_evidence_to_onedrive()
 
-        self.assertEqual((synced, pending), (1, 0))
+        self.assertEqual(result, {"cloud_synced": 0, "local_copied": 1, "pending": 1})
         destination = self.onedrive / "Torremolinos" / "Evidencias" / "pendiente.pdf"
         self.assertEqual(destination.read_bytes(), b"documento pendiente")
         with sqlite3.connect(self.database) as conn:
-            remote_url = conn.execute(
-                "SELECT remote_url FROM movement_attachments WHERE stored_name = 'pendiente.pdf'"
-            ).fetchone()[0]
+            remote_url, remote_provider = conn.execute(
+                "SELECT remote_url, remote_provider FROM movement_attachments WHERE stored_name = 'pendiente.pdf'"
+            ).fetchone()
         self.assertEqual(remote_url, str(destination))
+        self.assertEqual(remote_provider, "onedrive_local")
+
+    def test_graph_upload_is_recorded_only_after_onedrive_confirmation(self):
+        local_evidence = self.attachments / "confirmada.pdf"
+        local_evidence.write_bytes(b"evidencia confirmada")
+        with connect(self.database) as conn:
+            concept_id = conn.execute("SELECT id FROM concepts LIMIT 1").fetchone()[0]
+            movement_id = conn.execute(
+                """
+                INSERT INTO movements (movement_date, direction, concept_id, amount_cents)
+                VALUES ('2026-09-10', 'EGRESO', ?, 100)
+                """,
+                (concept_id,),
+            ).lastrowid
+            attachment_id = conn.execute(
+                """
+                INSERT INTO movement_attachments (
+                    movement_id, original_name, stored_name, content_type,
+                    file_size, local_path
+                ) VALUES (?, 'confirmada.pdf', 'confirmada.pdf', 'application/pdf', ?, ?)
+                """,
+                (movement_id, local_evidence.stat().st_size, str(local_evidence)),
+            ).lastrowid
+
+            confirmation = {
+                "id": "onedrive-item-1",
+                "web_url": "https://onedrive.live.com/item-1",
+                "size": local_evidence.stat().st_size,
+                "synced_at": "2026-09-11T12:00:00+00:00",
+            }
+            with patch.object(app, "upload_file_to_onedrive", return_value=confirmation):
+                app.sync_attachment_to_onedrive_graph(conn, int(attachment_id))
+
+            stored = conn.execute(
+                """
+                SELECT remote_provider, remote_item_id, remote_synced_at, remote_url
+                FROM movement_attachments WHERE id = ?
+                """,
+                (attachment_id,),
+            ).fetchone()
+
+        self.assertEqual(stored["remote_provider"], "onedrive_graph")
+        self.assertEqual(stored["remote_item_id"], "onedrive-item-1")
+        self.assertEqual(stored["remote_synced_at"], "2026-09-11T12:00:00+00:00")
+        self.assertEqual(stored["remote_url"], "https://onedrive.live.com/item-1")
 
 
 if __name__ == "__main__":
