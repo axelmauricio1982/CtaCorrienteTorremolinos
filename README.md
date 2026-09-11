@@ -68,6 +68,15 @@ python app.py
 
 No se necesitan Microsoft Entra, Client ID, contraseñas ni tokens. Si OneDrive no está disponible, el comprobante permanece guardado localmente y queda registrado para revisión.
 
+## Sincronización de datos con GitHub
+
+Los botones de sincronización utilizan la rama independiente `data-sync` para mantener los datos separados del código fuente:
+
+- **Push de datos:** vuelve a intentar la copia a OneDrive de las evidencias pendientes y publica en GitHub solamente `data/torremolinos.sqlite3` y `data/attachments/`.
+- **Pull de base de datos:** restaura solamente `data/torremolinos.sqlite3`. No modifica el código fuente ni descarga o elimina evidencias locales.
+
+La aplicación puede comprobar que una evidencia fue copiada a la carpeta local sincronizada de OneDrive. La subida definitiva a la nube es realizada en segundo plano por el cliente de OneDrive.
+
 En Windows puedes usar:
 
 ```bash

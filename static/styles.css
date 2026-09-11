@@ -104,6 +104,21 @@ nav a:hover {
   margin: 16px 0;
 }
 
+.report-summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.report-summary-grid .metric {
+  min-height: 76px;
+  padding: 12px 14px;
+}
+
+.report-summary-grid .metric strong {
+  font-size: 20px;
+}
+
 .metric,
 .panel {
   background: var(--surface);
@@ -126,6 +141,25 @@ nav a:hover {
 .metric strong {
   display: block;
   font-size: 24px;
+}
+
+.account-payment-inline {
+  display: grid;
+  min-width: 220px;
+  margin-left: auto;
+  padding: 5px 12px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  line-height: 1.2;
+}
+
+.account-payment-inline strong {
+  color: var(--text);
+  font-size: 18px;
+}
+
+.account-payment-inline small {
+  display: block;
 }
 
 .positive {
@@ -405,7 +439,7 @@ nav a:hover {
 .table-wrap {
   width: 100%;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   max-height: 440px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -426,10 +460,10 @@ nav a:hover {
 
 .report-month summary {
   display: grid;
-  grid-template-columns: minmax(90px, 0.8fr) repeat(4, minmax(135px, auto));
-  gap: 12px;
+  grid-template-columns: minmax(90px, 0.8fr) repeat(4, minmax(0, 1fr));
+  gap: 8px;
   align-items: center;
-  padding: 12px 14px;
+  padding: 9px 12px;
   cursor: pointer;
   font-weight: 600;
   list-style-position: inside;
@@ -440,13 +474,61 @@ nav a:hover {
 }
 
 .report-month .table-wrap {
-  margin: 0 10px 10px;
-  max-height: 300px;
+  margin: 0 6px 6px;
+  max-height: calc(38px + (var(--visible-report-rows, 10) * 43px));
+  scrollbar-gutter: stable;
+}
+
+.report-month .table-wrap.show-all-rows {
+  max-height: none;
+}
+
+.report-month .table-wrap.has-vertical-scroll {
+  border-bottom-color: var(--primary);
+  box-shadow: inset 0 -10px 12px -14px rgba(14, 79, 70, 0.8);
+}
+
+.report-month-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.report-month-controls label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.report-month-controls select {
+  width: auto;
+  min-width: 76px;
+  padding: 5px 28px 5px 8px;
+}
+
+.report-month .table-wrap th,
+.report-month .table-wrap td {
+  padding: 5px 7px;
+  font-size: 13px;
 }
 
 @media (max-width: 900px) {
+  .report-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .report-month summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .report-month-controls {
+    justify-content: space-between;
   }
 }
 
@@ -454,6 +536,81 @@ nav a:hover {
   width: 100%;
   table-layout: auto;
   border-collapse: collapse;
+}
+
+.movements-table {
+  min-width: 980px;
+}
+
+.movements-table th:nth-child(1),
+.movements-table td:nth-child(1),
+.movements-table th:nth-child(2),
+.movements-table td:nth-child(2),
+.movements-table th:nth-child(5),
+.movements-table td:nth-child(5),
+.movements-table th:nth-child(6),
+.movements-table td:nth-child(6),
+.movements-table th:nth-child(7),
+.movements-table td:nth-child(7),
+.movements-table th:nth-child(8),
+.movements-table td:nth-child(8) {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.movements-table th:nth-child(1),
+.movements-table td:nth-child(1) {
+  width: 110px;
+}
+
+.movements-table th:nth-child(2),
+.movements-table td:nth-child(2) {
+  width: 88px;
+}
+
+.movements-table th:nth-child(3),
+.movements-table td:nth-child(3) {
+  min-width: 170px;
+}
+
+.movements-table th:nth-child(4),
+.movements-table td:nth-child(4) {
+  min-width: 220px;
+}
+
+.movements-table th:nth-child(5),
+.movements-table td:nth-child(5),
+.movements-table th:nth-child(6),
+.movements-table td:nth-child(6) {
+  width: 110px;
+}
+
+.movements-table th:nth-child(7),
+.movements-table td:nth-child(7) {
+  min-width: 135px;
+}
+
+.movements-table th:nth-child(8),
+.movements-table td:nth-child(8) {
+  width: 125px;
+}
+
+.movements-table th:nth-child(9),
+.movements-table td:nth-child(9) {
+  width: 155px;
+  min-width: 155px;
+}
+
+.movements-table td.actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.movements-table td.actions form {
+  margin: 0;
 }
 
 .table-wrap th,
@@ -470,6 +627,27 @@ nav a:hover {
   top: 0;
   background: #f3f7f6;
   z-index: 1;
+}
+
+.table-wrap tr.payment-pending td {
+  background: #fff1ef;
+}
+
+.payment-status-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.payment-pending-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid #f0c7c0;
+  border-radius: 3px;
+  background: #fff1ef;
 }
 
 .table-wrap th.sortable-header {

@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
@@ -32,6 +33,8 @@ ATTACHMENT_DIR = BASE_DIR / "data" / "attachments"
 ONEDRIVE_LOCAL_FOLDER = Path(os.environ.get("ONEDRIVE_LOCAL_FOLDER", str(Path.home() / "OneDrive")))
 ONEDRIVE_EVIDENCE_DIR = ONEDRIVE_LOCAL_FOLDER / "Torremolinos" / "Evidencias"
 SYNC_STATE_FILE = BASE_DIR / ".torremolinos-sync.json"
+DATA_SYNC_BRANCH = "data-sync"
+DATA_SYNC_PATHS = ("data/torremolinos.sqlite3", "data/attachments")
 ALLOWED_ATTACHMENT_TYPES = {
     "image/jpeg",
     "image/jpg",
@@ -433,7 +436,7 @@ def sync_status() -> dict[str, str]:
   status = {"push": "No disponible", "push_commit": "", "pull": "Nunca registrado"}
   try:
     latest = subprocess.run(
-      ["git", "show", "-s", "--format=%cI%x09%h", "origin/main"],
+      ["git", "show", "-s", "--format=%cI%x09%h", f"origin/{DATA_SYNC_BRANCH}"],
       cwd=BASE_DIR,
       check=True,
       capture_output=True,
@@ -466,46 +469,143 @@ def save_sync_timestamp(action: str) -> None:
   SYNC_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
-def git_sync(action: str) -> str:
-  if action == "pull":
-    command = ["git", "pull", "--ff-only", "origin", "main"]
-    success_message = "Pull completado. Los datos y el codigo local estan actualizados."
-  elif action == "push":
-    subprocess.run(
-      ["git", "add", "-f", "data/torremolinos.sqlite3", "data/attachments"],
-      cwd=BASE_DIR,
-      check=True,
-      capture_output=True,
-      text=True,
-    )
-    staged = subprocess.run(
-      ["git", "diff", "--cached", "--quiet", "--", "data/torremolinos.sqlite3", "data/attachments"],
-      cwd=BASE_DIR,
-      check=False,
-    )
-    if staged.returncode == 0:
-      return "Push no necesario. No hay cambios nuevos en los datos."
-    subprocess.run(
-      ["git", "commit", "--only", "-m", "Sync application data and evidence", "--", "data/torremolinos.sqlite3", "data/attachments"],
-      cwd=BASE_DIR,
-      check=True,
-      capture_output=True,
-      text=True,
-    )
-    command = ["git", "push", "origin", "main"]
-    success_message = "Push completado. Los datos ya estan publicados en GitHub."
-  else:
-    raise ValueError("Operacion de sincronizacion no valida.")
+def git_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+  return subprocess.run(
+    ["git", *args],
+    cwd=BASE_DIR,
+    check=kwargs.pop("check", True),
+    capture_output=True,
+    timeout=kwargs.pop("timeout", 60),
+    **kwargs,
+  )
 
+
+def fetch_data_sync_branch(required: bool) -> str | None:
+  remote_ref = f"refs/heads/{DATA_SYNC_BRANCH}"
+  tracking_ref = f"refs/remotes/origin/{DATA_SYNC_BRANCH}"
+  probe = git_run(
+    ["ls-remote", "--exit-code", "--heads", "origin", remote_ref],
+    check=False,
+    text=True,
+  )
+  if probe.returncode == 2:
+    if required:
+      raise ValueError("Aun no existe un respaldo de datos en GitHub. Realice primero un Push de datos.")
+    return None
+  if probe.returncode != 0:
+    raise subprocess.CalledProcessError(probe.returncode, probe.args, probe.stdout, probe.stderr)
+  git_run(["fetch", "origin", f"+{remote_ref}:{tracking_ref}"], text=True)
+  return tracking_ref
+
+
+def sync_pending_evidence_to_onedrive() -> tuple[int, int]:
+  with connect(DEFAULT_DB) as conn:
+    attachments = conn.execute(
+      "SELECT id, remote_url FROM movement_attachments ORDER BY id"
+    ).fetchall()
+    pending = [row for row in attachments if not row["remote_url"] or not Path(row["remote_url"]).is_file()]
+    if not pending or not ONEDRIVE_LOCAL_FOLDER.is_dir():
+      return 0, len(pending)
+
+    synced = 0
+    for attachment in pending:
+      try:
+        sync_attachment_to_onedrive_folder(conn, int(attachment["id"]))
+        synced += 1
+      except (OSError, ValueError) as error:
+        row = conn.execute(
+          "SELECT movement_id FROM movement_attachments WHERE id = ?",
+          (attachment["id"],),
+        ).fetchone()
+        if row:
+          add_movement_log(conn, row["movement_id"], "COMMENTED", onedrive_error_message(error), CURRENT_USER)
+    return synced, len(pending) - synced
+
+
+def push_application_data() -> bool:
+  parent_ref = fetch_data_sync_branch(required=False)
+  with tempfile.TemporaryDirectory(prefix="torremolinos-git-") as temp_dir:
+    index_path = str(Path(temp_dir) / "index")
+    git_env = os.environ.copy()
+    git_env["GIT_INDEX_FILE"] = index_path
+    if parent_ref:
+      git_run(["read-tree", parent_ref], env=git_env, text=True)
+    else:
+      git_run(["read-tree", "--empty"], env=git_env, text=True)
+    git_run(["add", "--all", "--force", "--", *DATA_SYNC_PATHS], env=git_env, text=True)
+    tree = git_run(["write-tree"], env=git_env, text=True).stdout.strip()
+
+    if parent_ref:
+      parent_tree = git_run(["rev-parse", f"{parent_ref}^{{tree}}"], text=True).stdout.strip()
+      if tree == parent_tree:
+        return False
+
+    commit_args = ["commit-tree", tree, "-m", "Sync application data and evidence"]
+    if parent_ref:
+      parent_commit = git_run(["rev-parse", parent_ref], text=True).stdout.strip()
+      commit_args.extend(["-p", parent_commit])
+    commit = git_run(commit_args, text=True).stdout.strip()
+    git_run(["push", "origin", f"{commit}:refs/heads/{DATA_SYNC_BRANCH}"], text=True)
+    git_run(["update-ref", f"refs/remotes/origin/{DATA_SYNC_BRANCH}", commit], text=True)
+    return True
+
+
+def pull_application_database() -> None:
+  data_ref = fetch_data_sync_branch(required=True)
+  database_content = git_run(
+    ["show", f"{data_ref}:data/torremolinos.sqlite3"]
+  ).stdout
+  DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
+  temp_path: Path | None = None
   try:
-    subprocess.run(command, cwd=BASE_DIR, check=True, capture_output=True, text=True, timeout=60)
+    with tempfile.NamedTemporaryFile(
+      prefix="torremolinos-pull-",
+      suffix=".sqlite3",
+      dir=DEFAULT_DB.parent,
+      delete=False,
+    ) as temp_file:
+      temp_file.write(database_content)
+      temp_path = Path(temp_file.name)
+    with connect(temp_path) as source:
+      integrity = source.execute("PRAGMA quick_check").fetchone()[0]
+      if integrity != "ok":
+        raise ValueError("El respaldo descargado no es una base SQLite valida.")
+      with connect(DEFAULT_DB) as destination:
+        source.backup(destination)
+    init_db(DEFAULT_DB)
+  finally:
+    if temp_path:
+      temp_path.unlink(missing_ok=True)
+
+
+def git_sync(action: str) -> str:
+  try:
+    if action == "push":
+      synced, pending = sync_pending_evidence_to_onedrive()
+      pushed = push_application_data()
+      save_sync_timestamp(action)
+      if not pushed:
+        message = "Push no necesario. No hay cambios nuevos en la base de datos ni en las evidencias."
+      else:
+        message = "Push completado. Solo la base de datos y las evidencias se publicaron en GitHub."
+      if synced:
+        message += f" {synced} evidencia(s) pendiente(s) se copiaron a OneDrive."
+      if pending:
+        message += f" {pending} evidencia(s) siguen pendientes de OneDrive; permanecen respaldadas en GitHub."
+      return message
+    if action == "pull":
+      pull_application_database()
+      save_sync_timestamp(action)
+      return "Pull completado. Solo la base de datos fue restaurada; el codigo y las evidencias locales no cambiaron."
+    raise ValueError("Operacion de sincronizacion no valida.")
   except subprocess.CalledProcessError as error:
-    detail = (error.stderr or error.stdout or "Git devolvio un error.").strip().splitlines()[-1]
+    detail_source = error.stderr or error.stdout or b"Git devolvio un error."
+    if isinstance(detail_source, bytes):
+      detail_source = detail_source.decode("utf-8", errors="replace")
+    detail = detail_source.strip().splitlines()[-1]
     raise ValueError(f"No se pudo completar {action}: {detail}") from error
   except subprocess.TimeoutExpired as error:
     raise ValueError(f"La operacion {action} excedio el tiempo limite de 60 segundos.") from error
-  save_sync_timestamp(action)
-  return success_message
 
 
 def selected_attr(value: object, current: object) -> str:
@@ -587,6 +687,8 @@ def sync_attachment_to_onedrive_folder(conn, attachment_id: int) -> str:
     source = Path(attachment["local_path"])
     if not source.exists():
         raise ValueError("No se encontró el archivo local de evidencia.")
+    if not ONEDRIVE_LOCAL_FOLDER.is_dir():
+        raise OSError(f"La carpeta configurada no existe: {ONEDRIVE_LOCAL_FOLDER}")
     ONEDRIVE_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     destination = ONEDRIVE_EVIDENCE_DIR / attachment["stored_name"]
     shutil.copy2(source, destination)
@@ -982,10 +1084,10 @@ def render_dashboard(conn, query) -> str:
 
         <section class="panel sync-panel">
           <div class="section-head">
-            <div><h2>Sincronizacion con GitHub</h2><p class="muted">Comparte la base de datos y las evidencias entre tus equipos.</p></div>
+            <div><h2>Sincronizacion de datos</h2><p class="muted">Push respalda la base y las evidencias. Pull restaura unicamente la base de datos. El codigo fuente no se modifica.</p></div>
             <div class="toolbar sync-actions">
-              <form method="post" action="/sync"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull desde GitHub</button></form>
-              <form method="post" action="/sync" onsubmit="return confirm('Se publicara la base de datos y las evidencias actuales en GitHub. ¿Continuar?');"><input type="hidden" name="action" value="push"><button class="button primary" type="submit">Push a GitHub</button></form>
+              <form method="post" action="/sync" onsubmit="return confirm('¿Restaurar la base de datos desde GitHub? El codigo y las evidencias locales no cambiaran.');"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull de base de datos</button></form>
+              <form method="post" action="/sync" onsubmit="return confirm('Se respaldaran solamente la base de datos y las evidencias. Tambien se reintentara copiar a OneDrive cualquier evidencia pendiente. ¿Continuar?');"><input type="hidden" name="action" value="push"><button class="button primary" type="submit">Push de datos</button></form>
             </div>
           </div>
           <div class="sync-history">
@@ -1608,7 +1710,7 @@ def render_movements(conn, query) -> str:
     ).fetchall()
     rows = "".join(movement_row(row, include_balance=False, detail=True) for row in movements)
     if not rows:
-        rows = '<tr><td colspan="8" class="muted">Aun no hay movimientos registrados.</td></tr>'
+      rows = '<tr><td colspan="9" class="muted">Aun no hay movimientos registrados.</td></tr>'
     year = date.today().year
 
     return page(
@@ -1676,15 +1778,87 @@ def render_movements(conn, query) -> str:
             <button class="button" type="submit">Filtrar</button>
           </form>
           <div class="table-wrap">
-            <table>
+            <table class="movements-table">
               <thead>
                 <tr>
-                  <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th>
+                  <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th><th>Acciones</th>
                 </tr>
               </thead>
               <tbody>{rows}</tbody>
             </table>
           </div>
+        </section>
+        """,
+        "/movements",
+    )
+
+
+def render_movement_form(conn, movement_id: int) -> str:
+    movement = conn.execute(
+        "SELECT * FROM movements WHERE id = ? AND is_deleted = 0",
+        (movement_id,),
+    ).fetchone()
+    if not movement:
+        raise ValueError("Movimiento no encontrado.")
+    concepts = conn.execute(
+        "SELECT * FROM concepts WHERE (active = 1 AND is_deleted = 0) OR id = ? ORDER BY direction, name",
+        (movement["concept_id"],),
+    ).fetchall()
+    properties = conn.execute(
+        "SELECT * FROM properties WHERE (active = 1 AND is_deleted = 0) OR id = ? ORDER BY house_number",
+        (movement["property_id"],),
+    ).fetchall()
+    employees = conn.execute(
+        "SELECT * FROM employees WHERE (active = 1 AND is_deleted = 0) OR id = ? ORDER BY name",
+        (movement["employee_id"],),
+    ).fetchall()
+    return page(
+        "Editar movimiento",
+        f"""
+        <section class="panel narrow">
+          <form class="form-panel" method="post" action="/movements/update" enctype="multipart/form-data">
+            <input type="hidden" name="id" value="{movement['id']}">
+            <h2>Editar movimiento</h2>
+            <p class="muted">Al cambiar el concepto, el recibo se actualiza o se genera según la configuración del concepto.</p>
+            <label>Fecha <input name="movement_date" type="date" value="{esc(movement['movement_date'])}" required></label>
+            <label>Concepto
+              <select name="concept_id" required>
+                {select_options(concepts, movement['concept_id'], label_fn=lambda row: f"{row['direction'].title()} - {row['name']}")}
+              </select>
+            </label>
+            <div class="two-cols">
+              <label>Propiedad
+                <select name="property_id">
+                  {select_options(properties, movement['property_id'], blank='No aplica', label_fn=lambda row: f"Casa {row['house_number']} - {row['owner_name']}")}
+                </select>
+              </label>
+              <label>Empleado
+                <select name="employee_id">
+                  {select_options(employees, movement['employee_id'], blank='No aplica')}
+                </select>
+              </label>
+            </div>
+            <label>Persona / proveedor externo <input name="counterparty" value="{esc(movement['counterparty'])}"></label>
+            <label>Monto <input name="amount" inputmode="decimal" value="{money_input(movement['amount_cents'])}" required></label>
+            <div class="two-cols">
+              <label>Periodo mes
+                <select name="period_month">{month_options('Sin periodo', movement['period_month'])}</select>
+              </label>
+              <label>Periodo anio <input name="period_year" type="number" min="2000" max="2100" value="{esc(movement['period_year'] or '')}"></label>
+            </div>
+            <div class="two-cols">
+              <label>Metodo de pago <input name="payment_method" value="{esc(movement['payment_method'])}"></label>
+              <label>Referencia <input name="reference" value="{esc(movement['reference'])}"></label>
+            </div>
+            <label>Descripcion <textarea name="description" rows="3">{esc(movement['description'])}</textarea></label>
+            <label>Agregar comprobante / evidencia
+              <input type="file" name="attachment" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf">
+            </label>
+            <div class="actions">
+              <button class="button primary" type="submit">Guardar cambios</button>
+              <a class="button" href="/movements">Cancelar</a>
+            </div>
+          </form>
         </section>
         """,
         "/movements",
@@ -1714,6 +1888,13 @@ def movement_row(row, include_balance: bool, running_balance: int | None = None,
           <td>{expense}</td>
           <td>{esc(row['reference'])}</td>
           <td>{receipt}</td>
+          <td class="actions">
+            <a class="button small" href="/movements/edit?id={row['id']}">Editar</a>
+            <form method="post" action="/movements/delete" onsubmit="return confirm('¿Eliminar este movimiento? El registro quedara en el historial y dejara de afectar los saldos.');">
+              <input type="hidden" name="id" value="{row['id']}">
+              <button class="button small danger" type="submit">Eliminar</button>
+            </form>
+          </td>
         </tr>
         """
     balance_cell = f"<td>{format_money(running_balance)}</td>" if include_balance else ""
@@ -1782,6 +1963,19 @@ def property_account_totals(conn, property_id: int | None = None, start: str | N
             (pid, start or "2000-01-01", end or date.today().isoformat()),
         ).fetchone()[0]
 
+        payment_reported = conn.execute(
+            """
+            SELECT 1
+            FROM movements
+            WHERE property_id = ?
+              AND direction = 'INGRESO'
+              AND is_deleted = 0
+              AND movement_date BETWEEN ? AND ?
+            LIMIT 1
+            """,
+            (pid, start or "2000-01-01", end or date.today().isoformat()),
+        ).fetchone() is not None
+
         final_balance = initial_balance + income_total - expense_total
         result_rows.append(
             {
@@ -1792,6 +1986,7 @@ def property_account_totals(conn, property_id: int | None = None, start: str | N
                 "income_total": income_total,
                 "expense_total": expense_total,
                 "final_balance": final_balance,
+                "payment_reported": payment_reported,
             }
         )
 
@@ -1810,10 +2005,15 @@ def render_account_statement(conn, query) -> str:
         "SELECT id, house_number, owner_name FROM properties WHERE active = 1 AND is_deleted = 0 ORDER BY house_number"
     ).fetchall()
     rows = property_account_totals(conn, selected_property, start, end)
+    current_month = date.today().replace(day=1)
+    highlights_pending = start == current_month.isoformat() and datetime.strptime(end, "%Y-%m-%d").date().month == current_month.month
+    total_properties = len(rows)
+    paid_properties = sum(1 for row in rows if row["payment_reported"])
+    paid_percentage = (paid_properties / total_properties * 100) if total_properties else 0
 
     table_rows = "".join(
         f"""
-        <tr>
+        <tr class="{'payment-pending' if highlights_pending and not row['payment_reported'] else ''}">
           <td>{esc(row['house_number'])}</td>
           <td>{esc(row['owner_name'])}</td>
           <td>{format_money(row['initial_balance'])}</td>
@@ -1851,7 +2051,13 @@ def render_account_statement(conn, query) -> str:
             <label>Desde <input type="date" name="from" value="{esc(start)}"></label>
             <label>Hasta <input type="date" name="to" value="{esc(end)}"></label>
             <button class="button primary" type="submit">Filtrar</button>
+            <div class="account-payment-inline">
+              <span>Casas con pago registrado</span>
+              <strong>{paid_properties}/{total_properties}</strong>
+              <small>{paid_percentage:.2f}% del total</small>
+            </div>
           </form>
+          {f'<p class="payment-status-note"><span class="payment-pending-swatch"></span> Fondo rojo suave: casa sin pago registrado en {MONTHS[current_month.month]} {current_month.year}.</p>' if highlights_pending else ''}
 
           <div class="table-wrap">
             <table>
@@ -2009,7 +2215,7 @@ def report_movements(conn, start: str, end: str, property_id: int | None = None)
       WHERE m.is_deleted = 0
         AND m.movement_date BETWEEN ? AND ?
         {property_filter}
-      ORDER BY m.movement_date, m.id
+      ORDER BY m.movement_date DESC, m.id DESC
       """,
       params,
     ).fetchall()
@@ -2018,7 +2224,7 @@ def report_movements(conn, start: str, end: str, property_id: int | None = None)
 def report_detail_rows(conn, start: str, end: str, property_id: int | None = None) -> str:
     movements = report_movements(conn, start, end, property_id)
     rows = "".join(movement_row(row, include_balance=False, detail=True) for row in movements)
-    return rows or '<tr><td colspan="8" class="muted">No hay movimientos en este mes.</td></tr>'
+    return rows or '<tr><td colspan="9" class="muted">No hay movimientos en este mes.</td></tr>'
 
 
 def report_pdf_filename(start: str, end: str, property_id: int | None = None) -> str:
@@ -2103,6 +2309,10 @@ def build_report_pdf(conn, start: str, end: str, property_id: int | None = None)
 def render_reports(conn, query) -> str:
     today = date.today()
     property_id = parse_int(query.get("property_id", [""])[0])
+    try:
+        months_count = max(1, min(24, int(query.get("months", ["6"])[0])))
+    except (TypeError, ValueError):
+        months_count = 6
     start, end, selected_month = period_from_query(
         query,
         today.replace(day=1).isoformat(),
@@ -2115,11 +2325,21 @@ def render_reports(conn, query) -> str:
     summary = period_summary(conn, start, end, property_id)
     month_cursor = date.today().replace(day=1)
     comparison = []
-    for offset in range(5, -1, -1):
+    for offset in range(months_count - 1, -1, -1):
         month_start = add_months(month_cursor, -offset)
         month_end = add_months(month_start.replace(day=1), 1)
         month_end = date(month_end.year, month_end.month, 1) - timedelta(days=1)
         current = period_summary(conn, month_start.isoformat(), month_end.isoformat(), property_id)
+        month_movements = report_movements(
+            conn,
+            month_start.isoformat(),
+            month_end.isoformat(),
+            property_id,
+        )
+        detail_rows = "".join(
+            movement_row(row, include_balance=False, detail=True)
+            for row in month_movements
+        ) or '<tr><td colspan="9" class="muted">No hay movimientos en este mes.</td></tr>'
         comparison.append({
             "label": month_start.strftime("%b %Y").replace(".", ""),
             "start": month_start.isoformat(),
@@ -2128,16 +2348,28 @@ def render_reports(conn, query) -> str:
             "income": current["income"],
             "expense": current["expense"],
             "final": current["final"],
-            "details": report_detail_rows(conn, month_start.isoformat(), month_end.isoformat(), property_id),
+            "details": detail_rows,
+            "movement_count": len(month_movements),
         })
 
     comparison_rows = "".join(
         f"""
         <details class="report-month"{' open' if item['start'] == start and item['end'] == end else ''}>
           <summary><span class="report-month-name">{esc(item['label'])}</span><span class="report-opening">Saldo inicial: {format_money(item['opening'])}</span><span class="report-income">Ingresos: {format_money(item['income'])}</span><span class="report-expense">Egresos: {format_money(item['expense'])}</span><span class="report-final">Saldo final: {format_money(item['final'])}</span></summary>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th></tr></thead>
+          <div class="report-month-controls">
+            <span>{item['movement_count']} {'movimiento' if item['movement_count'] == 1 else 'movimientos'}</span>
+            <label>Filas visibles
+              <select class="report-row-limit" aria-label="Filas visibles para {esc(item['label'])}">
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="30">30</option>
+                <option value="all">Todas</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap report-month-table" data-row-count="{item['movement_count']}">
+            <table class="movements-table">
+              <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th><th>Acciones</th></tr></thead>
               <tbody>{item['details']}</tbody>
             </table>
           </div>
@@ -2145,7 +2377,7 @@ def render_reports(conn, query) -> str:
         """
         for item in comparison
     )
-    report_params = {"property_id": property_id or "", "month": selected_month, "from": start, "to": end}
+    report_params = {"property_id": property_id or "", "month": selected_month, "from": start, "to": end, "months": months_count}
     report_pdf_url = f"/reports.pdf?{urlencode(report_params)}"
 
     return page(
@@ -2171,10 +2403,15 @@ def render_reports(conn, query) -> str:
             </label>
             <label>Desde <input type="date" name="from" value="{esc(start)}"></label>
             <label>Hasta <input type="date" name="to" value="{esc(end)}"></label>
+            <label>Cantidad de meses
+              <select name="months">
+                {''.join(f'<option value="{count}"{" selected" if count == months_count else ""}>{count} meses</option>' for count in (3, 6, 9, 12, 18, 24))}
+              </select>
+            </label>
             <button class="button primary" type="submit">Filtrar</button>
           </form>
 
-          <section class="summary-grid compact">
+          <section class="summary-grid report-summary-grid">
             <article class="metric"><span>Saldo inicial</span><strong>{format_money(summary['opening'])}</strong></article>
             <article class="metric"><span>Ingresos</span><strong class="positive">{format_money(summary['income'])}</strong></article>
             <article class="metric"><span>Egresos</span><strong class="negative">{format_money(summary['expense'])}</strong></article>
@@ -2183,6 +2420,32 @@ def render_reports(conn, query) -> str:
 
           <section class="report-months">{comparison_rows}</section>
         </section>
+        <script>
+        (function () {{
+          document.querySelectorAll('.report-row-limit').forEach(function (select) {{
+            var month = select.closest('.report-month');
+            var tableWrap = month.querySelector('.report-month-table');
+            var rowCount = Number(tableWrap.dataset.rowCount || 0);
+
+            function updateVisibleRows() {{
+              if (select.value === 'all') {{
+                tableWrap.style.removeProperty('--visible-report-rows');
+                tableWrap.classList.add('show-all-rows');
+                tableWrap.classList.remove('has-vertical-scroll');
+                return;
+              }}
+
+              var visibleRows = Number(select.value);
+              tableWrap.style.setProperty('--visible-report-rows', visibleRows);
+              tableWrap.classList.remove('show-all-rows');
+              tableWrap.classList.toggle('has-vertical-scroll', rowCount > visibleRows);
+            }}
+
+            select.addEventListener('change', updateVisibleRows);
+            updateVisibleRows();
+          }});
+        }})();
+        </script>
         """,
         "/reports",
     )
@@ -2217,16 +2480,16 @@ def render_cashflow(conn, query) -> str:
         LEFT JOIN employees e ON e.id = m.employee_id
         WHERE m.movement_date BETWEEN ? AND ?
           AND m.is_deleted = 0
-        ORDER BY m.movement_date, m.id
+        ORDER BY m.movement_date DESC, m.id DESC
         """,
         (movement_start, end),
     ).fetchall()
-    income_total = 0
-    expense_total = 0
-    running = balance_before
+    income_total = sum(row["amount_cents"] for row in rows if row["direction"] == "INGRESO")
+    expense_total = sum(row["amount_cents"] for row in rows if row["direction"] == "EGRESO")
+    opening_balance = balance_before
     table_rows = ""
     if start <= opening_date <= end:
-        running += settings["opening_balance_cents"]
+        opening_balance += settings["opening_balance_cents"]
         table_rows += f"""
         <tr class="opening-row">
           <td>{format_date(opening_date)}</td>
@@ -2235,18 +2498,13 @@ def render_cashflow(conn, query) -> str:
           <td>Residencial Torremolinos</td>
           <td>-</td>
           <td>-</td>
-          <td>{format_money(running)}</td>
+          <td>{format_money(opening_balance)}</td>
           <td>{esc_text(settings['notes'])}</td>
           <td><span class="muted">No aplica</span></td>
         </tr>
         """
+    running = opening_balance + income_total - expense_total
     for row in rows:
-        if row["direction"] == "INGRESO":
-            income_total += row["amount_cents"]
-            running += row["amount_cents"]
-        else:
-            expense_total += row["amount_cents"]
-            running -= row["amount_cents"]
         counterparty = row["counterparty"] or row["employee_name"] or (
             f"Casa {row['house_number']} - {row['owner_name']}" if row["house_number"] else ""
         )
@@ -2268,6 +2526,10 @@ def render_cashflow(conn, query) -> str:
           <td>{receipt}</td>
         </tr>
         """
+        if row["direction"] == "INGRESO":
+          running -= row["amount_cents"]
+        else:
+          running += row["amount_cents"]
     if not table_rows:
         table_rows = '<tr><td colspan="9" class="muted">No hay movimientos en este rango.</td></tr>'
     params = urlencode({"from": start, "to": end})
@@ -2647,6 +2909,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.send_html(render_rate_form(conn, parse_int(query.get("id", [""])[0])))
                 elif parsed.path == "/movements":
                     self.send_html(render_movements(conn, query))
+                elif parsed.path == "/movements/edit":
+                  self.send_html(render_movement_form(conn, parse_int(query.get("id", [""])[0])))
                 elif parsed.path == "/accounts":
                     self.send_html(render_account_statement(conn, query))
                 elif parsed.path == "/reports":
@@ -2737,6 +3001,15 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                         self.redirect(f"/receipt/{receipt_id}")
                     else:
                         self.redirect("/movements?ok=1")
+                elif parsed.path == "/movements/update":
+                  receipt_id = self.update_movement(conn, data)
+                  if receipt_id:
+                    self.redirect(f"/receipt/{receipt_id}")
+                  else:
+                    self.redirect("/movements?ok=1")
+                elif parsed.path == "/movements/delete":
+                  self.delete_movement(conn, data)
+                  self.redirect("/movements?ok=1")
                 elif parsed.path == "/receipt/update":
                     self.update_receipt(conn, data)
                     receipt_id = parse_int(data.get("receipt_id"))
@@ -3066,6 +3339,161 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 CURRENT_USER,
             ),
         )
+
+    def sync_movement_receipt(self, conn, movement_id: int, concept) -> int | None:
+          movement = conn.execute(
+            """
+                 SELECT m.*, c.name AS concept_name, c.frequency,
+                   p.owner_name, p.house_number, p.notes AS property_notes,
+                   e.name AS employee_name
+            FROM movements m
+                 JOIN concepts c ON c.id = m.concept_id
+            LEFT JOIN properties p ON p.id = m.property_id
+            LEFT JOIN employees e ON e.id = m.employee_id
+            WHERE m.id = ? AND m.is_deleted = 0
+            """,
+            (movement_id,),
+          ).fetchone()
+          receipt = conn.execute(
+            "SELECT id FROM receipts WHERE movement_id = ? AND is_deleted = 0",
+            (movement_id,),
+          ).fetchone()
+          if not concept["requires_receipt"]:
+            if receipt:
+              conn.execute(
+                """
+                UPDATE receipts
+                SET active = 0, is_deleted = 1,
+                  updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                WHERE id = ?
+                """,
+                (CURRENT_USER, receipt["id"]),
+              )
+            return None
+
+          if not receipt:
+            return create_receipt(conn, movement_id)
+
+          if movement["direction"] == "INGRESO":
+            payer_name = movement["owner_name"] or movement["counterparty"] or "Pendiente"
+            if movement["house_number"]:
+              payer_name = f"Casa {movement['house_number']} - {payer_name}"
+            receiver_name = "Administracion Residencial Torremolinos"
+          else:
+            payer_name = "Administracion Residencial Torremolinos"
+            receiver_name = movement["employee_name"] or movement["counterparty"] or "Pendiente"
+          conn.execute(
+            """
+            UPDATE receipts
+            SET issued_date = ?, direction = ?, receipt_month = ?,
+              payer_name = ?, receiver_name = ?, amount_words = ?,
+              concept_text = ?, active = 1, is_deleted = 0,
+              updated_at = CURRENT_TIMESTAMP, updated_by = ?
+            WHERE id = ?
+            """,
+            (
+              movement["movement_date"],
+              movement["direction"],
+              movement["period_month"] or int(movement["movement_date"][5:7]),
+              payer_name,
+              receiver_name,
+              amount_to_words(movement["amount_cents"]),
+              receipt_concept_text(movement),
+              CURRENT_USER,
+              receipt["id"],
+            ),
+          )
+          return int(receipt["id"])
+
+    def update_movement(self, conn, data) -> int | None:
+          movement_id = parse_int(data.get("id"))
+          if not movement_id:
+            raise ValueError("Movimiento no encontrado.")
+          current = conn.execute(
+            "SELECT * FROM movements WHERE id = ? AND is_deleted = 0",
+            (movement_id,),
+          ).fetchone()
+          if not current:
+            raise ValueError("Movimiento no encontrado.")
+          concept_id = parse_int(data.get("concept_id"))
+          concept = conn.execute(
+            "SELECT * FROM concepts WHERE id = ? AND is_deleted = 0",
+            (concept_id,),
+          ).fetchone()
+          if not concept:
+            raise ValueError("Debe seleccionar un concepto valido.")
+          movement_date = data.get("movement_date") or date.today().isoformat()
+          employee_id = parse_int(data.get("employee_id"))
+          amount_raw = data.get("amount")
+          if amount_raw:
+            amount_cents = parse_money(amount_raw)
+          else:
+            rate = current_rate(conn, concept_id, employee_id, movement_date)
+            if not rate:
+              raise ValueError("El concepto no tiene una vigencia activa para esa fecha; ingrese el monto manualmente.")
+            amount_cents = rate["amount_cents"]
+          conn.execute(
+            """
+            UPDATE movements
+            SET movement_date = ?, direction = ?, concept_id = ?, property_id = ?,
+              employee_id = ?, counterparty = ?, amount_cents = ?, period_month = ?,
+              period_year = ?, payment_method = ?, reference = ?, description = ?,
+              updated_at = CURRENT_TIMESTAMP, updated_by = ?
+            WHERE id = ? AND is_deleted = 0
+            """,
+            (
+              movement_date,
+              concept["direction"],
+              concept_id,
+              parse_int(data.get("property_id")),
+              employee_id,
+              data.get("counterparty", ""),
+              amount_cents,
+              parse_int(data.get("period_month")),
+              parse_int(data.get("period_year")),
+              data.get("payment_method", ""),
+              data.get("reference", ""),
+              data.get("description", "") or concept["name"],
+              CURRENT_USER,
+              movement_id,
+            ),
+          )
+          add_movement_log(conn, movement_id, "UPDATED", f"Movimiento actualizado: {concept['name']}.", CURRENT_USER)
+          attachment = data.get("attachment")
+          if attachment is not None and hasattr(attachment, "filename"):
+            attachment_id = save_movement_attachment(conn, movement_id, attachment, CURRENT_USER)
+            if attachment_id:
+              try:
+                sync_attachment_to_onedrive_folder(conn, int(attachment_id))
+              except OSError as error:
+                add_movement_log(conn, movement_id, "COMMENTED", onedrive_error_message(error), CURRENT_USER)
+          return self.sync_movement_receipt(conn, movement_id, concept)
+
+    def delete_movement(self, conn, data) -> None:
+          movement_id = parse_int(data.get("id"))
+          if not movement_id:
+            raise ValueError("Movimiento no encontrado.")
+          updated = conn.execute(
+            """
+            UPDATE movements
+            SET active = 0, is_deleted = 1,
+              updated_at = CURRENT_TIMESTAMP, updated_by = ?
+            WHERE id = ? AND is_deleted = 0
+            """,
+            (CURRENT_USER, movement_id),
+          ).rowcount
+          if not updated:
+            raise ValueError("Movimiento no encontrado.")
+          conn.execute(
+            """
+            UPDATE receipts
+            SET active = 0, is_deleted = 1,
+              updated_at = CURRENT_TIMESTAMP, updated_by = ?
+            WHERE movement_id = ? AND is_deleted = 0
+            """,
+            (CURRENT_USER, movement_id),
+          )
+          add_movement_log(conn, movement_id, "DELETED", "Movimiento eliminado logicamente.", CURRENT_USER)
 
     def add_movement(self, conn, data) -> int | None:
         concept_id = parse_int(data.get("concept_id"))
