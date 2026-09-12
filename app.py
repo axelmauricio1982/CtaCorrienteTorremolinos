@@ -11,6 +11,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
@@ -43,6 +45,7 @@ ONEDRIVE_TOKEN_CACHE = BASE_DIR / ".onedrive-token-cache.json"
 SYNC_STATE_FILE = BASE_DIR / ".torremolinos-sync.json"
 DATA_SYNC_BRANCH = "data-sync"
 DATA_SYNC_PATHS = ("data/torremolinos.sqlite3", "data/attachments")
+SHUTDOWN_DELAY_SECONDS = 2.0
 ALLOWED_ATTACHMENT_TYPES = {
     "image/jpeg",
     "image/jpg",
@@ -127,6 +130,43 @@ TABLE_SORT_SCRIPT = """
       });
     });
   });
+})();
+</script>
+"""
+
+SHUTDOWN_SCRIPT = """
+<script>
+(function () {
+  var seconds = 3;
+  var countdownEl = document.getElementById('shutdown-countdown');
+  var statusEl = document.getElementById('shutdown-status');
+
+  var timer = setInterval(function () {
+    seconds -= 1;
+    if (seconds <= 0) {
+      clearInterval(timer);
+      statusEl.textContent = 'Verificando...';
+      checkDown(0);
+      return;
+    }
+    countdownEl.textContent = seconds;
+  }, 1000);
+
+  function checkDown(attempt) {
+    fetch('/onedrive/status', { cache: 'no-store' })
+      .then(function () { retry(attempt); })
+      .catch(function () {
+        statusEl.textContent = 'Servidor apagado correctamente. Ya puedes cerrar esta pestana.';
+      });
+  }
+
+  function retry(attempt) {
+    if (attempt >= 6) {
+      statusEl.textContent = 'El servidor parece seguir activo. Cierralo manualmente si continua respondiendo.';
+      return;
+    }
+    setTimeout(function () { checkDown(attempt + 1); }, 1000);
+  }
 })();
 </script>
 """
@@ -629,6 +669,18 @@ def git_sync(action: str) -> str:
     raise ValueError(f"No se pudo completar {action}: {detail}") from error
   except subprocess.TimeoutExpired as error:
     raise ValueError(f"La operacion {action} excedio el tiempo limite de 60 segundos.") from error
+
+
+def render_shutdown_page(message: str) -> str:
+  content = f"""
+    <section class="panel narrow">
+      <h2>Apagando el servidor</h2>
+      <p>{esc(message)}</p>
+      <p id="shutdown-status">Cerrando en <strong id="shutdown-countdown">3</strong> segundos...</p>
+    </section>
+    {SHUTDOWN_SCRIPT}
+  """
+  return page("Apagar servidor", content)
 
 
 def selected_attr(value: object, current: object) -> str:
@@ -1269,6 +1321,7 @@ def render_dashboard(conn, query) -> str:
             <div class="toolbar sync-actions">
               <form method="post" action="/sync" onsubmit="return confirm('¿Restaurar la base de datos desde GitHub? El codigo y las evidencias locales no cambiaran.');"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull de base de datos</button></form>
               <form method="post" action="/sync" onsubmit="return confirm('Se respaldaran solamente la base de datos y las evidencias. Tambien se reintentara copiar a OneDrive cualquier evidencia pendiente. ¿Continuar?');"><input type="hidden" name="action" value="push"><button class="button primary" type="submit">Push de datos</button></form>
+              <form method="post" action="/shutdown" onsubmit="return confirm('Se hara un Push de datos y, si se completa, se apagara el servidor. ¿Continuar?');"><button class="button danger" type="submit">Apagar servidor (Off)</button></form>
             </div>
           </div>
           <div class="sync-history">
@@ -3154,6 +3207,11 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 message = git_sync(data.get("action", ""))
                 self.redirect(f"/?{urlencode({'sync_message': message})}")
                 return
+            if parsed.path == "/shutdown":
+                message = git_sync("push")
+                self.send_html(render_shutdown_page(message))
+                threading.Thread(target=self.trigger_shutdown, daemon=True).start()
+                return
             with connect(self.db_path) as conn:
                 if parsed.path == "/properties":
                     self.add_property(conn, data)
@@ -3823,6 +3881,14 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
+
+    def trigger_shutdown(self) -> None:
+        # Runs on its own thread: waits for the response above to reach the
+        # client, then stops the serve_forever loop (from a different thread,
+        # as required by http.server) and force-exits the process.
+        time.sleep(SHUTDOWN_DELAY_SECONDS)
+        self.server.shutdown()
+        os._exit(0)
 
 
 def main() -> None:
