@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 # Inicia el sistema Residencial Torremolinos con un doble clic.
 # Funciona en Linux y macOS (el .command de macOS llama a este script).
 

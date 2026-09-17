@@ -2,6 +2,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import shutil
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -66,18 +67,30 @@ class DataSyncTests(unittest.TestCase):
         self.globals_patch.stop()
         self.temporary_directory.cleanup()
 
-    def test_push_uses_data_only_branch_and_pull_restores_only_database(self):
+    def test_push_and_pull_use_canonical_paths_across_installations(self):
         source_before = (self.repository / "app.py").read_text(encoding="utf-8")
         main_before = run_git(self.repository, "rev-parse", "main").stdout.strip()
 
         self.assertTrue(app.push_application_data())
 
-        run_git(
-            self.repository,
-            "fetch",
-            "origin",
-            "data-sync:refs/remotes/origin/data-sync",
-        )
+        packaged_root = self.repository / "dist"
+        packaged_database = packaged_root / "data" / "torremolinos.sqlite3"
+        packaged_attachments = packaged_root / "data" / "attachments"
+        packaged_attachments.mkdir(parents=True)
+        shutil.copy2(self.database, packaged_database)
+        (packaged_attachments / "portatil.pdf").write_bytes(b"evidencia portable")
+        with connect(packaged_database) as conn:
+            conn.execute(
+                "INSERT INTO properties (house_number, owner_name) VALUES (?, ?)",
+                (777, "Cambio desde ejecutable"),
+            )
+
+        app.BASE_DIR = packaged_root
+        app.DEFAULT_DB = packaged_database
+        app.ATTACHMENT_DIR = packaged_attachments
+        app.SYNC_STATE_FILE = packaged_root / ".torremolinos-sync.json"
+        self.assertTrue(app.push_application_data())
+
         backed_up_paths = run_git(
             self.repository,
             "ls-tree",
@@ -87,23 +100,39 @@ class DataSyncTests(unittest.TestCase):
         ).stdout.splitlines()
         self.assertEqual(
             backed_up_paths,
-            ["data/attachments/evidencia.pdf", "data/torremolinos.sqlite3"],
+            ["data/attachments/portatil.pdf", "data/torremolinos.sqlite3"],
         )
+        self.assertFalse(any(path.startswith("dist/") for path in backed_up_paths))
         self.assertEqual(run_git(self.repository, "rev-parse", "main").stdout.strip(), main_before)
 
-        (self.repository / "app.py").write_text("version = 2\n", encoding="utf-8")
-        with connect(self.database) as conn:
-            conn.execute(
-                "INSERT INTO properties (house_number, owner_name) VALUES (?, ?)",
-                (999, "Cambio local"),
-            )
-        app.pull_application_database()
+        mac_root = self.repository / "mac-install"
+        mac_database = mac_root / "data" / "torremolinos.sqlite3"
+        mac_attachments = mac_root / "data" / "attachments"
+        init_db(mac_database)
+        mac_attachments.mkdir(parents=True, exist_ok=True)
+        (mac_attachments / "solo-local.pdf").write_bytes(b"no eliminar")
+        app.BASE_DIR = mac_root
+        app.DEFAULT_DB = mac_database
+        app.ATTACHMENT_DIR = mac_attachments
+        app.SYNC_STATE_FILE = mac_root / ".torremolinos-sync.json"
 
-        with connect(self.database) as conn:
+        (self.repository / "app.py").write_text("version = 2\n", encoding="utf-8")
+        restored_attachments = app.pull_application_database()
+
+        with connect(mac_database) as conn:
             restored = conn.execute(
-                "SELECT COUNT(*) FROM properties WHERE house_number = 999"
+                "SELECT COUNT(*) FROM properties WHERE house_number = 777"
             ).fetchone()[0]
-        self.assertEqual(restored, 0)
+        self.assertEqual(restored, 1)
+        self.assertEqual(restored_attachments, 1)
+        self.assertEqual(
+            (mac_attachments / "portatil.pdf").read_bytes(),
+            b"evidencia portable",
+        )
+        self.assertEqual(
+            (mac_attachments / "solo-local.pdf").read_bytes(),
+            b"no eliminar",
+        )
         self.assertEqual((self.repository / "app.py").read_text(encoding="utf-8"), "version = 2\n")
         self.assertNotEqual((self.repository / "app.py").read_text(encoding="utf-8"), source_before)
 
@@ -126,7 +155,7 @@ class DataSyncTests(unittest.TestCase):
                     file_size, local_path, remote_url
                 ) VALUES (?, 'pendiente.pdf', 'pendiente.pdf', 'application/pdf', ?, ?, '')
                 """,
-                (movement_id, local_evidence.stat().st_size, str(local_evidence)),
+                (movement_id, local_evidence.stat().st_size, "/Users/otro/OneDrive/pendiente.pdf"),
             )
 
         result = app.sync_pending_evidence_to_onedrive()
@@ -140,6 +169,19 @@ class DataSyncTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(remote_url, str(destination))
         self.assertEqual(remote_provider, "onedrive_local")
+
+        second_result = app.sync_pending_evidence_to_onedrive()
+        self.assertEqual(second_result, {"cloud_synced": 0, "local_copied": 0, "pending": 1})
+        with connect(self.database) as conn:
+            stored_path = conn.execute(
+                "SELECT local_path FROM movement_attachments WHERE stored_name = 'pendiente.pdf'"
+            ).fetchone()[0]
+            sync_logs = conn.execute(
+                "SELECT COUNT(*) FROM movement_logs WHERE movement_id = ? AND action = 'SYNCED'",
+                (movement_id,),
+            ).fetchone()[0]
+        self.assertEqual(stored_path, "data/attachments/pendiente.pdf")
+        self.assertEqual(sync_logs, 1)
 
     def test_graph_upload_is_recorded_only_after_onedrive_confirmation(self):
         local_evidence = self.attachments / "confirmada.pdf"
@@ -160,7 +202,7 @@ class DataSyncTests(unittest.TestCase):
                     file_size, local_path
                 ) VALUES (?, 'confirmada.pdf', 'confirmada.pdf', 'application/pdf', ?, ?)
                 """,
-                (movement_id, local_evidence.stat().st_size, str(local_evidence)),
+                (movement_id, local_evidence.stat().st_size, r"C:\Users\otro\OneDrive\confirmada.pdf"),
             ).lastrowid
 
             confirmation = {
@@ -169,8 +211,9 @@ class DataSyncTests(unittest.TestCase):
                 "size": local_evidence.stat().st_size,
                 "synced_at": "2026-09-11T12:00:00+00:00",
             }
-            with patch.object(app, "upload_file_to_onedrive", return_value=confirmation):
+            with patch.object(app, "upload_file_to_onedrive", return_value=confirmation) as upload:
                 app.sync_attachment_to_onedrive_graph(conn, int(attachment_id))
+                self.assertEqual(upload.call_args.args[1], local_evidence)
 
             stored = conn.execute(
                 """

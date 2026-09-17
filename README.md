@@ -61,6 +61,25 @@ Al recompilar, el constructor conserva cualquier base que ya exista dentro de
 No muevas solamente `Torremolinos.exe` después de comenzar a usarlo: mueve toda
 la carpeta `dist` para conservar también la base y las evidencias.
 
+## Linux y macOS
+
+Para iniciar directamente con Python en Linux o macOS:
+
+```bash
+bash ./iniciar_torremolinos.sh
+```
+
+Para generar un ejecutable autónomo nativo del sistema actual:
+
+```bash
+bash ./build_unix.sh
+```
+
+El resultado queda en `dist/Torremolinos`. PyInstaller no genera binarios
+multiplataforma: el ejecutable de Linux debe construirse en Linux y el de macOS
+debe construirse en macOS. En ambos casos la base y las evidencias permanecen
+en `dist/data` y utilizan el mismo flujo Push/Pull que Windows.
+
 ## OneDrive Personal
 
 La aplicación conserva cada comprobante en `data/attachments/` y puede cargarlo directamente a OneDrive Personal mediante Microsoft Graph. La aplicación registrada usa:
@@ -103,7 +122,11 @@ Si no hay conexión ni carpeta local disponible, el comprobante permanece guarda
 Los botones de sincronización utilizan la rama independiente `data-sync` para mantener los datos separados del código fuente:
 
 - **Push de datos:** vuelve a intentar la carga directa a OneDrive de las evidencias pendientes y publica en GitHub solamente `data/torremolinos.sqlite3` y `data/attachments/`.
-- **Pull de base de datos:** restaura solamente `data/torremolinos.sqlite3`. No modifica el código fuente ni descarga o elimina evidencias locales.
+- **Pull de datos:** restaura `data/torremolinos.sqlite3` y descarga las evidencias respaldadas que falten o hayan cambiado. No modifica el código fuente ni elimina evidencias locales adicionales.
+
+La rama `data-sync` siempre usa esas rutas canónicas, tanto al ejecutar desde
+Python como desde el `.exe`. Las rutas locales guardadas en Windows, Linux o
+macOS se normalizan automáticamente al directorio de datos de la instalación actual.
 
 Cuando se utiliza Microsoft Graph, la aplicación guarda el identificador remoto y la fecha de sincronización únicamente después de que OneDrive confirma el tamaño completo del archivo. Una copia en la carpeta local de OneDrive se distingue de una carga confirmada en la nube.
 

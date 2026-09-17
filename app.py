@@ -22,7 +22,7 @@ from email.parser import BytesParser
 from email.policy import default as email_default
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from torremolinos.db import connect, init_db
@@ -48,7 +48,9 @@ ONEDRIVE_EVIDENCE_DIR = ONEDRIVE_LOCAL_FOLDER / "Torremolinos" / "Evidencias"
 ONEDRIVE_TOKEN_CACHE = BASE_DIR / ".onedrive-token-cache.json"
 SYNC_STATE_FILE = BASE_DIR / ".torremolinos-sync.json"
 DATA_SYNC_BRANCH = "data-sync"
-DATA_SYNC_PATHS = ("data/torremolinos.sqlite3", "data/attachments")
+DATA_SYNC_DB_PATH = "data/torremolinos.sqlite3"
+DATA_SYNC_ATTACHMENT_DIR = "data/attachments"
+LEGACY_DATA_SYNC_PATHS = ("dist/data/torremolinos.sqlite3", "dist/data/attachments")
 SHUTDOWN_DELAY_SECONDS = 2.0
 ALLOWED_ATTACHMENT_TYPES = {
     "image/jpeg",
@@ -226,6 +228,38 @@ def period_label(month: int | None, year: int | None) -> str:
     if year:
         return str(year)
     return ""
+
+
+def attachment_storage_reference(stored_name: str) -> str:
+    return (Path("data") / "attachments" / Path(stored_name).name).as_posix()
+
+
+def resolve_attachment_path(attachment) -> Path:
+    """Resolve evidence after moving the application between operating systems."""
+    stored_name = Path(str(attachment["stored_name"] or "")).name
+    configured = Path(str(attachment["local_path"] or ""))
+    candidates = []
+    if str(configured):
+        candidates.append(configured if configured.is_absolute() else BASE_DIR / configured)
+    if stored_name:
+        candidates.append(ATTACHMENT_DIR / stored_name)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return ATTACHMENT_DIR / stored_name
+
+
+def normalize_attachment_paths(conn) -> None:
+    attachments = conn.execute(
+        "SELECT id, stored_name, local_path FROM movement_attachments"
+    ).fetchall()
+    for attachment in attachments:
+        canonical = ATTACHMENT_DIR / Path(attachment["stored_name"]).name
+        if canonical.is_file():
+            conn.execute(
+                "UPDATE movement_attachments SET local_path = ? WHERE id = ?",
+                (attachment_storage_reference(attachment["stored_name"]), attachment["id"]),
+            )
 
 
 def receipt_pdf_filename(receipt) -> str:
@@ -420,7 +454,7 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
         (receipt["movement_id"],),
     ).fetchall()
     for attachment in attachments:
-      path = Path(attachment["local_path"])
+      path = resolve_attachment_path(attachment)
       if not path.exists():
             continue
       content = path.read_bytes()
@@ -606,11 +640,8 @@ def notice(query: dict[str, list[str]]) -> str:
 def sync_status() -> dict[str, str]:
   status = {"push": "No disponible", "push_commit": "", "pull": "Nunca registrado"}
   try:
-    latest = subprocess.run(
-      ["git", "show", "-s", "--format=%cI%x09%h", f"origin/{DATA_SYNC_BRANCH}"],
-      cwd=BASE_DIR,
-      check=True,
-      capture_output=True,
+    latest = git_run(
+      ["show", "-s", "--format=%cI%x09%h", f"origin/{DATA_SYNC_BRANCH}"],
       text=True,
       timeout=10,
     ).stdout.strip().split("\t", 1)
@@ -640,10 +671,22 @@ def save_sync_timestamp(action: str) -> None:
   SYNC_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
+def git_repository_root() -> Path:
+  result = subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"],
+    cwd=BASE_DIR,
+    check=True,
+    capture_output=True,
+    text=True,
+    timeout=10,
+  )
+  return Path(result.stdout.strip()).resolve()
+
+
 def git_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
   return subprocess.run(
     ["git", *args],
-    cwd=BASE_DIR,
+    cwd=git_repository_root(),
     check=kwargs.pop("check", True),
     capture_output=True,
     timeout=kwargs.pop("timeout", 60),
@@ -671,6 +714,7 @@ def fetch_data_sync_branch(required: bool) -> str | None:
 
 def sync_pending_evidence_to_onedrive() -> dict[str, int]:
   with connect(DEFAULT_DB) as conn:
+    normalize_attachment_paths(conn)
     pending = conn.execute(
       """
       SELECT id, movement_id
@@ -693,10 +737,23 @@ def sync_pending_evidence_to_onedrive() -> dict[str, int]:
           result["cloud_synced"] += 1
           result["pending"] -= 1
         elif ONEDRIVE_LOCAL_FOLDER.is_dir():
+          current = conn.execute(
+            "SELECT * FROM movement_attachments WHERE id = ?",
+            (attachment["id"],),
+          ).fetchone()
+          local_copy = ONEDRIVE_EVIDENCE_DIR / current["stored_name"]
+          source = resolve_attachment_path(current)
+          if (
+            current["remote_provider"] == "onedrive_local"
+            and source.is_file()
+            and local_copy.is_file()
+            and source.stat().st_size == local_copy.stat().st_size
+          ):
+            continue
           sync_attachment_to_onedrive_folder(conn, int(attachment["id"]))
           result["local_copied"] += 1
       except (OSError, ValueError, OneDriveError) as error:
-        add_movement_log(
+        add_movement_log_once(
           conn,
           attachment["movement_id"],
           "COMMENTED",
@@ -716,7 +773,31 @@ def push_application_data() -> bool:
       git_run(["read-tree", parent_ref], env=git_env, text=True)
     else:
       git_run(["read-tree", "--empty"], env=git_env, text=True)
-    git_run(["add", "--all", "--force", "--", *DATA_SYNC_PATHS], env=git_env, text=True)
+    git_run(
+      [
+        "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
+        DATA_SYNC_DB_PATH,
+        DATA_SYNC_ATTACHMENT_DIR,
+        *LEGACY_DATA_SYNC_PATHS,
+      ],
+      env=git_env,
+      text=True,
+    )
+
+    files_to_store = [(DEFAULT_DB, DATA_SYNC_DB_PATH)]
+    if ATTACHMENT_DIR.is_dir():
+      files_to_store.extend(
+        (path, f"{DATA_SYNC_ATTACHMENT_DIR}/{path.relative_to(ATTACHMENT_DIR).as_posix()}")
+        for path in sorted(ATTACHMENT_DIR.rglob("*"))
+        if path.is_file()
+      )
+    for source, repository_path in files_to_store:
+      blob = git_run(["hash-object", "-w", str(source.resolve())], text=True).stdout.strip()
+      git_run(
+        ["update-index", "--add", "--cacheinfo", f"100644,{blob},{repository_path}"],
+        env=git_env,
+        text=True,
+      )
     tree = git_run(["write-tree"], env=git_env, text=True).stdout.strip()
 
     if parent_ref:
@@ -734,10 +815,10 @@ def push_application_data() -> bool:
     return True
 
 
-def pull_application_database() -> None:
+def pull_application_database() -> int:
   data_ref = fetch_data_sync_branch(required=True)
   database_content = git_run(
-    ["show", f"{data_ref}:data/torremolinos.sqlite3"]
+    ["show", f"{data_ref}:{DATA_SYNC_DB_PATH}"]
   ).stdout
   DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
   temp_path: Path | None = None
@@ -761,6 +842,36 @@ def pull_application_database() -> None:
     if temp_path:
       temp_path.unlink(missing_ok=True)
 
+  attachment_paths = git_run(
+    ["ls-tree", "-r", "--name-only", data_ref, "--", DATA_SYNC_ATTACHMENT_DIR],
+    text=True,
+  ).stdout.splitlines()
+  restored_attachments = 0
+  for remote_path in attachment_paths:
+    relative = PurePosixPath(remote_path)
+    if relative.parts[:2] != ("data", "attachments") or len(relative.parts) < 3:
+      continue
+    destination = ATTACHMENT_DIR.joinpath(*relative.parts[2:])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    content = git_run(["show", f"{data_ref}:{remote_path}"]).stdout
+    with tempfile.NamedTemporaryFile(
+      prefix="torremolinos-evidence-",
+      suffix=destination.suffix,
+      dir=destination.parent,
+      delete=False,
+    ) as temp_file:
+      temp_file.write(content)
+      attachment_temp_path = Path(temp_file.name)
+    try:
+      os.replace(attachment_temp_path, destination)
+      restored_attachments += 1
+    finally:
+      attachment_temp_path.unlink(missing_ok=True)
+
+  with connect(DEFAULT_DB) as conn:
+    normalize_attachment_paths(conn)
+  return restored_attachments
+
 
 def git_sync(action: str) -> str:
   try:
@@ -777,12 +888,18 @@ def git_sync(action: str) -> str:
       if evidence["local_copied"]:
         message += f" {evidence['local_copied']} evidencia(s) se copiaron a la carpeta local de OneDrive."
       if evidence["pending"]:
-        message += f" {evidence['pending']} evidencia(s) aun no tienen confirmacion de nube; permanecen respaldadas en GitHub."
+        message += (
+          f" GitHub ya respalda los datos. {evidence['pending']} evidencia(s) "
+          "siguen pendientes exclusivamente de confirmacion en OneDrive."
+        )
       return message
     if action == "pull":
-      pull_application_database()
+      restored_attachments = pull_application_database()
       save_sync_timestamp(action)
-      return "Pull completado. Solo la base de datos fue restaurada; el codigo y las evidencias locales no cambiaron."
+      return (
+        "Pull completado. La base de datos fue restaurada y "
+        f"{restored_attachments} evidencia(s) se sincronizaron; el codigo fuente no cambio."
+      )
     raise ValueError("Operacion de sincronizacion no valida.")
   except subprocess.CalledProcessError as error:
     detail_source = error.stderr or error.stdout or b"Git devolvio un error."
@@ -818,6 +935,19 @@ def add_movement_log(conn, movement_id: int, action: str, details: str, created_
         """,
         (movement_id, action, details, created_by),
     )
+
+
+def add_movement_log_once(conn, movement_id: int, action: str, details: str, created_by: str = CURRENT_USER) -> None:
+    existing = conn.execute(
+        """
+        SELECT 1 FROM movement_logs
+        WHERE movement_id = ? AND action = ? AND details = ?
+        LIMIT 1
+        """,
+        (movement_id, action, details),
+    ).fetchone()
+    if not existing:
+        add_movement_log(conn, movement_id, action, details, created_by)
 
 
 def save_movement_attachment(conn, movement_id: int, uploaded_file, created_by: str = CURRENT_USER):
@@ -864,7 +994,7 @@ def save_movement_attachment(conn, movement_id: int, uploaded_file, created_by: 
             stored_name,
             content_type,
             len(content),
-            str(local_path),
+            attachment_storage_reference(stored_name),
             created_by,
         ),
     )
@@ -882,14 +1012,16 @@ def sync_attachment_to_onedrive_folder(conn, attachment_id: int) -> str:
     ).fetchone()
     if not attachment:
         raise ValueError("Evidencia no encontrada.")
-    source = Path(attachment["local_path"])
+    source = resolve_attachment_path(attachment)
     if not source.exists():
         raise ValueError("No se encontró el archivo local de evidencia.")
     if not ONEDRIVE_LOCAL_FOLDER.is_dir():
         raise OSError(f"La carpeta configurada no existe: {ONEDRIVE_LOCAL_FOLDER}")
     ONEDRIVE_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     destination = ONEDRIVE_EVIDENCE_DIR / attachment["stored_name"]
-    shutil.copy2(source, destination)
+    already_copied = destination.is_file() and destination.stat().st_size == source.stat().st_size
+    if not already_copied:
+        shutil.copy2(source, destination)
     remote_path = str(destination)
     conn.execute(
         """
@@ -900,12 +1032,13 @@ def sync_attachment_to_onedrive_folder(conn, attachment_id: int) -> str:
         """,
         (remote_path, attachment_id),
     )
-    add_movement_log(
-      conn,
-      attachment["movement_id"],
-      "SYNCED",
-      f"Evidencia '{attachment['original_name']}' copiada a OneDrive.",
-    )
+    if not already_copied:
+      add_movement_log(
+        conn,
+        attachment["movement_id"],
+        "SYNCED",
+        f"Evidencia '{attachment['original_name']}' copiada a OneDrive.",
+      )
     return remote_path
 
 
@@ -915,7 +1048,9 @@ def sync_attachment_to_onedrive_graph(conn, attachment_id: int) -> str:
     ).fetchone()
     if not attachment:
         raise ValueError("Evidencia no encontrada.")
-    source = Path(attachment["local_path"])
+    source = resolve_attachment_path(attachment)
+    if not source.is_file():
+        raise ValueError("No se encontró el archivo local de evidencia.")
     uploaded = upload_file_to_onedrive(
         ONEDRIVE_TOKEN_CACHE,
         source,
@@ -1440,9 +1575,9 @@ def render_dashboard(conn, query) -> str:
 
         <section class="panel sync-panel">
           <div class="section-head">
-            <div><h2>Sincronizacion de datos</h2><p class="muted">Push respalda la base y las evidencias. Pull restaura unicamente la base de datos. El codigo fuente no se modifica.</p></div>
+            <div><h2>Sincronizacion de datos</h2><p class="muted">Push respalda la base y las evidencias. Pull restaura la base y descarga las evidencias sin modificar el codigo fuente.</p></div>
             <div class="toolbar sync-actions">
-              <form method="post" action="/sync" onsubmit="return confirm('¿Restaurar la base de datos desde GitHub? El codigo y las evidencias locales no cambiaran.');"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull de base de datos</button></form>
+              <form method="post" action="/sync" onsubmit="return confirm('¿Restaurar la base de datos y sincronizar las evidencias desde GitHub? El codigo fuente no cambiara.');"><input type="hidden" name="action" value="pull"><button class="button" type="submit">Pull de datos</button></form>
               <form method="post" action="/sync" onsubmit="return confirm('Se respaldaran solamente la base de datos y las evidencias. Tambien se reintentara copiar a OneDrive cualquier evidencia pendiente. ¿Continuar?');"><input type="hidden" name="action" value="push"><button class="button primary" type="submit">Push de datos</button></form>
               <form method="post" action="/shutdown" onsubmit="return confirm('Se hara un Push de datos y, si se completa, se apagara el servidor. ¿Continuar?');"><button class="button danger" type="submit">Apagar servidor (Off)</button></form>
             </div>
@@ -1450,7 +1585,7 @@ def render_dashboard(conn, query) -> str:
           <div class="sync-history">
             <div><span>Ultimo Push</span><strong>{esc(synchronization['push'])}</strong>{f'<small>Commit {esc(synchronization["push_commit"])}</small>' if synchronization['push_commit'] else ''}</div>
             <div><span>Ultimo Pull</span><strong>{esc(synchronization['pull'])}</strong></div>
-            <div><span>OneDrive</span><strong>{'Conectado' if cloud.get('connected') else 'No conectado'}</strong><small>{cloud_pending} evidencia(s) sin confirmacion de nube</small></div>
+            <div><span>OneDrive</span><strong>{'Conectado' if cloud.get('connected') else 'No conectado'}</strong><small>{cloud_pending} evidencia(s) sin confirmacion de OneDrive; no afecta el respaldo en GitHub</small></div>
           </div>
         </section>
 
