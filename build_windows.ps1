@@ -1,9 +1,9 @@
 param(
-    [switch]$SkipInstall,
-    [string]$Name = "Torremolinos"
+    [switch]$SkipInstall
 )
 
 $ErrorActionPreference = "Stop"
+$Name = "Torremolinos"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $projectRoot
 
@@ -33,6 +33,16 @@ python -m PyInstaller `
 
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller no pudo generar el ejecutable."
+}
+
+$obsoleteExecutables = @(
+    (Join-Path $projectRoot "dist\Torremolinos-actualizado.exe"),
+    (Join-Path $projectRoot "dist\Torremolinos-sync-corregido.exe")
+)
+foreach ($obsoleteExecutable in $obsoleteExecutables) {
+    if (Test-Path -LiteralPath $obsoleteExecutable) {
+        Remove-Item -LiteralPath $obsoleteExecutable -Force
+    }
 }
 
 $dataDirectory = Join-Path $projectRoot "dist\data"
