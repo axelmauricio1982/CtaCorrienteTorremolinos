@@ -158,9 +158,12 @@ class DataSyncTests(unittest.TestCase):
                 (movement_id, local_evidence.stat().st_size, "/Users/otro/OneDrive/pendiente.pdf"),
             )
 
+        with connect(self.database) as conn:
+            self.assertEqual(app.onedrive_pending_count(conn), 1)
+
         result = app.sync_pending_evidence_to_onedrive()
 
-        self.assertEqual(result, {"cloud_synced": 0, "local_copied": 1, "pending": 1})
+        self.assertEqual(result, {"cloud_synced": 0, "local_copied": 1, "pending": 0})
         destination = self.onedrive / "Torremolinos" / "Evidencias" / "pendiente.pdf"
         self.assertEqual(destination.read_bytes(), b"documento pendiente")
         with closing(sqlite3.connect(self.database)) as conn:
@@ -171,8 +174,9 @@ class DataSyncTests(unittest.TestCase):
         self.assertEqual(remote_provider, "onedrive_local")
 
         second_result = app.sync_pending_evidence_to_onedrive()
-        self.assertEqual(second_result, {"cloud_synced": 0, "local_copied": 0, "pending": 1})
+        self.assertEqual(second_result, {"cloud_synced": 0, "local_copied": 0, "pending": 0})
         with connect(self.database) as conn:
+            self.assertEqual(app.onedrive_pending_count(conn), 0)
             stored_path = conn.execute(
                 "SELECT local_path FROM movement_attachments WHERE stored_name = 'pendiente.pdf'"
             ).fetchone()[0]

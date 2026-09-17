@@ -128,7 +128,7 @@ La rama `data-sync` siempre usa esas rutas canónicas, tanto al ejecutar desde
 Python como desde el `.exe`. Las rutas locales guardadas en Windows, Linux o
 macOS se normalizan automáticamente al directorio de datos de la instalación actual.
 
-Cuando se utiliza Microsoft Graph, la aplicación guarda el identificador remoto y la fecha de sincronización únicamente después de que OneDrive confirma el tamaño completo del archivo. Una copia en la carpeta local de OneDrive se distingue de una carga confirmada en la nube.
+Cuando se utiliza Microsoft Graph, la aplicación guarda el identificador remoto y la fecha de sincronización únicamente después de que OneDrive confirma el tamaño completo del archivo. Cuando se utiliza el cliente local de OneDrive, la aplicación considera sincronizada la evidencia al verificar que la carpeta configurada contiene un archivo con el mismo nombre y tamaño; OneDrive se encarga de replicar después esa carpeta entre los equipos.
 
 En Windows puedes usar:
 

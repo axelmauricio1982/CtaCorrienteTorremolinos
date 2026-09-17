@@ -712,19 +712,36 @@ def fetch_data_sync_branch(required: bool) -> str | None:
   return tracking_ref
 
 
+def attachment_is_synced(attachment) -> bool:
+  """Return whether OneDrive has a complete copy of an attachment.
+
+  Microsoft Graph supplies an item id and confirmation timestamp. When the
+  desktop OneDrive client is used instead, the strongest confirmation
+  available to this local application is a file with the expected name and
+  size inside the configured synchronized folder.
+  """
+  graph_confirmed = (
+    attachment["remote_provider"] == "onedrive_graph"
+    and bool(attachment["remote_item_id"])
+    and bool(attachment["remote_synced_at"])
+  )
+  if graph_confirmed:
+    return True
+
+  destination = ONEDRIVE_EVIDENCE_DIR / Path(attachment["stored_name"]).name
+  try:
+    return destination.is_file() and destination.stat().st_size == int(attachment["file_size"])
+  except (OSError, TypeError, ValueError):
+    return False
+
+
 def sync_pending_evidence_to_onedrive() -> dict[str, int]:
   with connect(DEFAULT_DB) as conn:
     normalize_attachment_paths(conn)
-    pending = conn.execute(
-      """
-      SELECT id, movement_id
-      FROM movement_attachments
-      WHERE remote_provider != 'onedrive_graph'
-         OR remote_item_id = ''
-         OR remote_synced_at = ''
-      ORDER BY id
-      """
+    attachments = conn.execute(
+      "SELECT * FROM movement_attachments ORDER BY id"
     ).fetchall()
+    pending = [attachment for attachment in attachments if not attachment_is_synced(attachment)]
     result = {"cloud_synced": 0, "local_copied": 0, "pending": len(pending)}
     if not pending:
       return result
@@ -744,14 +761,15 @@ def sync_pending_evidence_to_onedrive() -> dict[str, int]:
           local_copy = ONEDRIVE_EVIDENCE_DIR / current["stored_name"]
           source = resolve_attachment_path(current)
           if (
-            current["remote_provider"] == "onedrive_local"
-            and source.is_file()
+            source.is_file()
             and local_copy.is_file()
             and source.stat().st_size == local_copy.stat().st_size
           ):
+            result["pending"] -= 1
             continue
           sync_attachment_to_onedrive_folder(conn, int(attachment["id"]))
           result["local_copied"] += 1
+          result["pending"] -= 1
       except (OSError, ValueError, OneDriveError) as error:
         add_movement_log_once(
           conn,
@@ -1382,17 +1400,8 @@ def create_receipt(conn, movement_id: int) -> int:
 
 
 def onedrive_pending_count(conn) -> int:
-    return int(
-        conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM movement_attachments
-            WHERE remote_provider != 'onedrive_graph'
-               OR remote_item_id = ''
-               OR remote_synced_at = ''
-            """
-        ).fetchone()[0]
-    )
+    attachments = conn.execute("SELECT * FROM movement_attachments").fetchall()
+    return sum(not attachment_is_synced(attachment) for attachment in attachments)
 
 
 def render_onedrive_settings(conn, query) -> str:
@@ -1461,7 +1470,7 @@ def render_onedrive_settings(conn, query) -> str:
 
           <div class="onedrive-grid">
             <article>
-              <span>Evidencias sin confirmacion de nube</span>
+              <span>Evidencias pendientes de OneDrive</span>
               <strong>{pending}</strong>
             </article>
             <article>
@@ -1585,7 +1594,7 @@ def render_dashboard(conn, query) -> str:
           <div class="sync-history">
             <div><span>Ultimo Push</span><strong>{esc(synchronization['push'])}</strong>{f'<small>Commit {esc(synchronization["push_commit"])}</small>' if synchronization['push_commit'] else ''}</div>
             <div><span>Ultimo Pull</span><strong>{esc(synchronization['pull'])}</strong></div>
-            <div><span>OneDrive</span><strong>{'Conectado' if cloud.get('connected') else 'No conectado'}</strong><small>{cloud_pending} evidencia(s) sin confirmacion de OneDrive; no afecta el respaldo en GitHub</small></div>
+            <div><span>OneDrive</span><strong>{'Conectado por API' if cloud.get('connected') else ('Carpeta local disponible' if ONEDRIVE_LOCAL_FOLDER.is_dir() else 'No conectado')}</strong><small>{cloud_pending} evidencia(s) pendiente(s) de copiar a OneDrive; no afecta el respaldo en GitHub</small></div>
           </div>
         </section>
 
@@ -3459,7 +3468,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             if parsed.path == "/onedrive/sync":
                 result = sync_pending_evidence_to_onedrive()
                 message = (
-                    f"OneDrive confirmo {result['cloud_synced']} evidencia(s). "
+                    f"Sincronizacion revisada: {result['cloud_synced']} evidencia(s) confirmada(s) por la API y "
+                    f"{result['local_copied']} copiada(s) a la carpeta de OneDrive. "
                     f"Quedan {result['pending']} pendiente(s)."
                 )
                 self.redirect(f"/onedrive?{urlencode({'message': message})}")
