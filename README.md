@@ -42,6 +42,25 @@ Luego abre esta dirección en el navegador:
 http://127.0.0.1:8000
 ```
 
+## Ejecutable para Windows
+
+Para generar una versión portátil que no requiera una instalación separada de Python:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+```
+
+El resultado queda en `dist\Torremolinos.exe`. Al abrirlo, inicia el servidor y
+abre automáticamente la aplicación en el navegador. La base de datos y los
+comprobantes se conservan en `dist\data`, fuera del ejecutable, para que no se
+pierdan al actualizarlo.
+
+Al recompilar, el constructor conserva cualquier base que ya exista dentro de
+`dist\data` y agrega las evidencias disponibles en el proyecto.
+
+No muevas solamente `Torremolinos.exe` después de comenzar a usarlo: mueve toda
+la carpeta `dist` para conservar también la base y las evidencias.
+
 ## OneDrive Personal
 
 La aplicación conserva cada comprobante en `data/attachments/` y puede cargarlo directamente a OneDrive Personal mediante Microsoft Graph. La aplicación registrada usa:

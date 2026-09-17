@@ -1114,6 +1114,9 @@ tr:last-child td {
 }
 
 .receipt {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   background: #fff;
   border: 1px solid #b8c7c1;
   border-radius: 8px;
@@ -1133,13 +1136,40 @@ tr:last-child td {
   font-size: 26px;
 }
 
-.receipt-status {
-  margin: 18px 0 4px;
-  color: #b42318;
-  font-size: 32px;
-  font-weight: 900;
-  line-height: 1;
+.receipt > header,
+.receipt > section,
+.receipt > footer {
+  position: relative;
+  z-index: 1;
+}
+
+.receipt-watermark {
+  position: absolute;
+  z-index: 0;
+  top: 48%;
+  left: 50%;
+  display: grid;
+  gap: 4px;
+  width: 120%;
+  color: rgba(180, 35, 24, 0.1);
+  line-height: 0.9;
   text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -50%) rotate(-32deg);
+  transform-origin: center;
+  white-space: nowrap;
+}
+
+.receipt-watermark strong {
+  font-size: clamp(72px, 13vw, 112px);
+  font-weight: 900;
+  letter-spacing: 0.025em;
+}
+
+.receipt-watermark span {
+  font-size: clamp(17px, 3vw, 24px);
+  font-weight: 900;
+  letter-spacing: 0.25em;
 }
 
 .receipt-number {

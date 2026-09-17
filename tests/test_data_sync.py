@@ -2,6 +2,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,7 +134,7 @@ class DataSyncTests(unittest.TestCase):
         self.assertEqual(result, {"cloud_synced": 0, "local_copied": 1, "pending": 1})
         destination = self.onedrive / "Torremolinos" / "Evidencias" / "pendiente.pdf"
         self.assertEqual(destination.read_bytes(), b"documento pendiente")
-        with sqlite3.connect(self.database) as conn:
+        with closing(sqlite3.connect(self.database)) as conn:
             remote_url, remote_provider = conn.execute(
                 "SELECT remote_url, remote_provider FROM movement_attachments WHERE stored_name = 'pendiente.pdf'"
             ).fetchone()

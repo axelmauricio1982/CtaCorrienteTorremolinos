@@ -10,11 +10,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unicodedata
 import uuid
+import webbrowser
 from datetime import date, datetime, timedelta
 from email.parser import BytesParser
 from email.policy import default as email_default
@@ -33,7 +35,9 @@ from torremolinos.onedrive import (
 )
 
 
-BASE_DIR = Path(__file__).resolve().parent
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+BASE_DIR = Path(sys.executable).resolve().parent if IS_FROZEN else RESOURCE_DIR
 DEFAULT_DB = BASE_DIR / "data" / "torremolinos.sqlite3"
 APP_NAME = "Residencial Torremolinos"
 CURRENT_USER = "ADM"
@@ -243,10 +247,13 @@ def receipt_pdf_filename(receipt) -> str:
 def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
     try:
         import fitz
+        import reportlab
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter
-        from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib.units import inch
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfgen import canvas
     except ImportError as error:
         raise ValueError("Para generar PDF con evidencia instala reportlab y pymupdf.") from error
 
@@ -266,31 +273,147 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
     if not receipt:
         raise ValueError("Recibo no encontrado.")
 
-    output = io.BytesIO()
-    styles = getSampleStyleSheet()
-    document = SimpleDocTemplate(output, pagesize=letter, rightMargin=0.7 * inch, leftMargin=0.7 * inch)
     period_month = receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])
     period_year = receipt["period_year"] or int(receipt["issued_date"][:4])
     concept_text = receipt_concept_text(receipt)
     counterpart = receipt["payer_name"] if receipt["direction"] == "INGRESO" else receipt["receiver_name"]
+    counterpart_label = "Recibí de" if receipt["direction"] == "INGRESO" else "Pagado a"
     title = "Recibo de ingreso" if receipt["direction"] == "INGRESO" else "Comprobante de egreso"
-    story = [
-        Paragraph("<b>RESIDENCIAL TORREMOLINOS</b>", styles["Title"]),
-        Paragraph(f"<b>{title}</b> &nbsp;&nbsp; No. {esc(receipt['receipt_no'])}", styles["Heading2"]),
-        Spacer(1, 12),
-        Paragraph(f"<b>CANCELADO</b><br/>Lugar: {esc(receipt['place'])}<br/>Fecha: {format_date(receipt['issued_date'])}<br/>Monto: {format_money(receipt['amount_cents'])}", styles["BodyText"]),
-        Spacer(1, 12),
-        Paragraph(f"Recibí de: {esc(counterpart)}", styles["BodyText"]),
-        Paragraph(f"La cantidad de: {esc(receipt['amount_words'])}", styles["BodyText"]),
-        Paragraph(f"Por concepto de: {esc(concept_text)}", styles["BodyText"]),
-        Paragraph(f"Periodo: Mes de {MONTHS[period_month].title()} Año {period_year}", styles["BodyText"]),
-        Paragraph(f"Referencia: {esc(receipt['reference'] or 'No aplica')}", styles["BodyText"]),
-        Spacer(1, 36),
-        Paragraph("Entrega / paga__________________________________________________", styles["BodyText"]),
-        Spacer(1, 24),
-        Paragraph("Recibe________________________________________________________", styles["BodyText"]),
-    ]
-    document.build(story)
+
+    output = io.BytesIO()
+    page_width, page_height = letter
+    pdf = canvas.Canvas(output, pagesize=letter)
+    pdf.setTitle(receipt_pdf_filename(receipt))
+    primary = colors.HexColor("#176b5f")
+    text_color = colors.HexColor("#202625")
+    muted = colors.HexColor("#66736f")
+    line_color = colors.HexColor("#d9e2de")
+    cancelled = colors.HexColor("#b42318")
+    left = 0.7 * inch
+    right = page_width - left
+    regular_font = "ReceiptSans"
+    bold_font = "ReceiptSans-Bold"
+    font_directory = Path(reportlab.__file__).resolve().parent / "fonts"
+    if regular_font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(regular_font, font_directory / "Vera.ttf"))
+    if bold_font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(bold_font, font_directory / "VeraBd.ttf"))
+
+    def wrapped_lines(value: object, font_name: str, font_size: float, max_width: float) -> list[str]:
+        words = str(value or "").split()
+        if not words:
+            return [""]
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    # Se dibuja primero para que los datos del recibo permanezcan legibles.
+    pdf.saveState()
+    pdf.setFillColor(cancelled)
+    if hasattr(pdf, "setFillAlpha"):
+        pdf.setFillAlpha(0.10)
+    pdf.translate(page_width / 2, page_height / 2)
+    pdf.rotate(32)
+    pdf.setFont(bold_font, 72)
+    pdf.drawCentredString(0, 0, "CANCELADO")
+    pdf.setFont(bold_font, 16)
+    pdf.drawCentredString(0, -24, "PAGO REALIZADO")
+    pdf.restoreState()
+
+    pdf.setFillColor(muted)
+    pdf.setFont(bold_font, 9)
+    pdf.drawString(left, page_height - 52, "RESIDENCIAL TORREMOLINOS")
+    pdf.setFillColor(text_color)
+    pdf.setFont(bold_font, 22)
+    pdf.drawString(left, page_height - 78, title)
+
+    number_width = 2.15 * inch
+    number_height = 0.64 * inch
+    number_x = right - number_width
+    number_y = page_height - 92
+    pdf.setStrokeColor(line_color)
+    pdf.roundRect(number_x, number_y, number_width, number_height, 6, stroke=1, fill=0)
+    pdf.setFillColor(muted)
+    pdf.setFont(regular_font, 9)
+    pdf.drawRightString(right - 10, number_y + number_height - 14, "No.")
+    pdf.setFillColor(text_color)
+    pdf.setFont(bold_font, 15)
+    pdf.drawRightString(right - 10, number_y + 11, str(receipt["receipt_no"]))
+
+    pdf.setStrokeColor(primary)
+    pdf.setLineWidth(2)
+    pdf.line(left, page_height - 105, right, page_height - 105)
+
+    box_y = page_height - 178
+    box_height = 49
+    box_gap = 9
+    box_width = (right - left - (2 * box_gap)) / 3
+    summary = (
+        ("Lugar", receipt["place"]),
+        ("Fecha", format_date(receipt["issued_date"])),
+        ("Monto", format_money(receipt["amount_cents"])),
+    )
+    for index, (label, value) in enumerate(summary):
+        box_x = left + index * (box_width + box_gap)
+        pdf.setStrokeColor(line_color)
+        pdf.setLineWidth(1)
+        pdf.roundRect(box_x, box_y, box_width, box_height, 6, stroke=1, fill=0)
+        pdf.setFillColor(muted)
+        pdf.setFont(regular_font, 8)
+        pdf.drawString(box_x + 9, box_y + box_height - 13, label)
+        pdf.setFillColor(text_color)
+        pdf.setFont(bold_font, 11)
+        pdf.drawString(box_x + 9, box_y + 12, str(value))
+
+    details = (
+        (counterpart_label, counterpart),
+        ("La cantidad de", receipt["amount_words"]),
+        ("Por concepto de", concept_text),
+        ("Periodo", f"Mes de {MONTHS[period_month].title()} Año {period_year}"),
+        ("Referencia", receipt["reference"] or "No aplica"),
+    )
+    detail_y = box_y - 38
+    label_width = 102
+    value_x = left + label_width
+    value_width = right - value_x
+    for label, value in details:
+        lines = wrapped_lines(value, regular_font, 10.5, value_width)
+        pdf.setFillColor(muted)
+        pdf.setFont(bold_font, 9.5)
+        pdf.drawString(left, detail_y, f"{label}:")
+        pdf.setFillColor(text_color)
+        pdf.setFont(regular_font, 10.5)
+        line_y = detail_y
+        for line in lines:
+            pdf.drawString(value_x, line_y, line)
+            line_y -= 14
+        underline_y = line_y + 5
+        pdf.setStrokeColor(line_color)
+        pdf.setLineWidth(0.8)
+        pdf.line(left, underline_y, right, underline_y)
+        detail_y = underline_y - 22
+
+    signature_y = max(92, min(145, detail_y - 34))
+    signature_gap = 48
+    signature_width = (right - left - signature_gap) / 2
+    for index, label in enumerate(("Entrega / paga", "Recibe")):
+        signature_x = left + index * (signature_width + signature_gap)
+        pdf.setStrokeColor(text_color)
+        pdf.line(signature_x, signature_y, signature_x + signature_width, signature_y)
+        pdf.setFillColor(muted)
+        pdf.setFont(regular_font, 9)
+        pdf.drawCentredString(signature_x + signature_width / 2, signature_y - 14, label)
+
+    pdf.showPage()
+    pdf.save()
     combined = fitz.open(stream=output.getvalue(), filetype="pdf")
     attachments = conn.execute(
         "SELECT * FROM movement_attachments WHERE movement_id = ? ORDER BY uploaded_at, id",
@@ -308,8 +431,8 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
         evidence_pdf = fitz.open(stream=evidence.convert_to_pdf(), filetype="pdf")
         evidence.close()
         evidence = evidence_pdf
-        combined.insert_pdf(evidence)
-        evidence.close()
+      combined.insert_pdf(evidence)
+      evidence.close()
     pdf_bytes = combined.tobytes()
     combined.close()
     return pdf_bytes, receipt_pdf_filename(receipt)
@@ -3072,7 +3195,10 @@ def render_receipt(conn, receipt_id: int) -> str:
           <strong>{esc(receipt['receipt_no'])}</strong>
         </div>
       </header>
-      <div class="receipt-status">CANCELADO</div>
+      <div class="receipt-watermark" aria-hidden="true">
+        <strong>CANCELADO</strong>
+        <span>PAGO REALIZADO</span>
+      </div>
 
       <section class="receipt-grid">
         <label>Lugar <strong>{esc(receipt['place'])}</strong></label>
@@ -3831,7 +3957,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         return None
 
     def send_static(self, filename: str):
-        path = BASE_DIR / "static" / filename
+        path = RESOURCE_DIR / "static" / filename
         if not path.exists():
             self.send_response(404)
             self.end_headers()
@@ -3896,15 +4022,32 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--db", default=str(DEFAULT_DB))
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="No abrir el navegador automaticamente al usar el ejecutable.",
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db).resolve()
     init_db(db_path)
     TorremolinosHandler.db_path = db_path
 
-    server = ThreadingHTTPServer((args.host, args.port), TorremolinosHandler)
-    print(f"{APP_NAME} listo en http://{args.host}:{args.port}")
+    browser_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
+    app_url = f"http://{browser_host}:{args.port}"
+
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), TorremolinosHandler)
+    except OSError:
+        if IS_FROZEN and not args.no_browser:
+            webbrowser.open(app_url)
+            return
+        raise
+
+    print(f"{APP_NAME} listo en {app_url}")
     print(f"Base de datos: {db_path}")
+    if IS_FROZEN and not args.no_browser:
+        threading.Timer(0.8, webbrowser.open, args=(app_url,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

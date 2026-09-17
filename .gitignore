@@ -21,3 +21,7 @@ data/attachments/
 .torremolinos-sync.json
 .onedrive-token-cache.json
 .onedrive-token-cache.json.tmp
+build/
+dist/
+output/
+*.spec
