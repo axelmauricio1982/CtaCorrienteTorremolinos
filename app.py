@@ -23,7 +23,7 @@ from email.policy import default as email_default
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from torremolinos.db import connect, init_db
 from torremolinos.onedrive import (
@@ -37,7 +37,25 @@ from torremolinos.onedrive import (
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-BASE_DIR = Path(sys.executable).resolve().parent if IS_FROZEN else RESOURCE_DIR
+
+
+def application_base_dir() -> Path:
+    if not IS_FROZEN:
+        return RESOURCE_DIR
+    executable = Path(sys.executable).resolve()
+    # A macOS .app runs from <name>.app/Contents/MacOS. Persistent data must
+    # live beside the bundle, not inside it, so rebuilding the app cannot
+    # replace the database or its evidence files.
+    if (
+        sys.platform == "darwin"
+        and executable.parent.name == "MacOS"
+        and executable.parent.parent.name == "Contents"
+    ):
+        return executable.parents[3]
+    return executable.parent
+
+
+BASE_DIR = application_base_dir()
 DEFAULT_DB = BASE_DIR / "data" / "torremolinos.sqlite3"
 APP_NAME = "Residencial Torremolinos"
 CURRENT_USER = "ADM"
@@ -193,6 +211,69 @@ def parse_int(value: str | None) -> int | None:
     return int(value)
 
 
+def normalize_phone_number(value: object) -> str:
+    """Store Guatemalan phone numbers consistently without losing readability."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not digits:
+        return ""
+    if digits.startswith("502") and len(digits) == 11:
+        digits = digits[3:]
+    if len(digits) != 8:
+        raise ValueError("El numero de telefono debe contener 8 digitos.")
+    return f"{digits[:4]}-{digits[4:]}"
+
+
+def whatsapp_url(phone_number: object, message: str) -> str:
+    phone = normalize_phone_number(phone_number).replace("-", "")
+    if not phone:
+        return ""
+    return f"https://web.whatsapp.com/send?phone=502{phone}&text={quote(message)}"
+
+
+def open_url_in_firefox(url: str) -> None:
+    """Open a URL specifically in Firefox on the supported desktop systems."""
+    if sys.platform == "darwin":
+        command = ["/usr/bin/open", "-a", "Firefox", url]
+    else:
+        firefox_path = shutil.which("firefox")
+        if sys.platform == "win32" and not firefox_path:
+            candidates = [
+                Path(os.environ.get(variable, "")) / "Mozilla Firefox" / "firefox.exe"
+                for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+                if os.environ.get(variable)
+            ]
+            firefox_path = next(
+                (str(candidate) for candidate in candidates if candidate.is_file()), None
+            )
+        if not firefox_path:
+            raise ValueError("No se encontro Firefox instalado en este equipo.")
+        command = [firefox_path, url]
+    try:
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise ValueError("No fue posible abrir WhatsApp Web en Firefox.") from exc
+
+
+def receipt_whatsapp_message(receipt) -> str:
+    receipt_month = (
+        receipt["receipt_month"]
+        or receipt["period_month"]
+        or int(receipt["issued_date"][5:7])
+    )
+    receipt_year = receipt["period_year"] or int(receipt["issued_date"][:4])
+    period = f"Mes de {MONTHS[receipt_month].title()} Año {receipt_year}"
+    return (
+        f"Hola, {receipt['payer_name']}. Le comparto el recibo {receipt['receipt_no']} "
+        f"de Residencial Torremolinos, correspondiente a {period}, por "
+        f"{format_money(receipt['amount_cents'])}. Adjunto el comprobante en PDF."
+    )
+
+
 def parse_money(value: str | None) -> int:
     if value is None or value.strip() == "":
         raise ValueError("El monto es obligatorio cuando no existe una vigencia aplicable.")
@@ -262,6 +343,29 @@ def normalize_attachment_paths(conn) -> None:
             )
 
 
+def compact_person_name(value: object) -> str:
+    words = re.findall(r"[^\W_]+", str(value or ""), flags=re.UNICODE)
+    return "".join(word[:1].upper() + word[1:] for word in words) or "Empleado"
+
+
+def salary_fortnight_prefix(receipt) -> str:
+    source = " ".join(
+        str(receipt[key] or "")
+        for key in ("description", "concept_text", "reference")
+        if key in receipt.keys()
+    )
+    normalized = unicodedata.normalize("NFKD", source)
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    ).lower()
+    if re.search(r"\b(?:primera|primer|1ra|1er)\s+quincena\b", normalized):
+        return "1erQuincena"
+    if re.search(r"\b(?:segunda|segundo|2da|2do)\s+quincena\b", normalized):
+        return "2daQuincena"
+    issued_day = int(str(receipt["issued_date"])[8:10])
+    return "1erQuincena" if issued_day <= 15 else "2daQuincena"
+
+
 def receipt_pdf_filename(receipt) -> str:
     month = MONTHS[receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])]
     year = receipt["period_year"] or int(receipt["issued_date"][:4])
@@ -270,6 +374,13 @@ def receipt_pdf_filename(receipt) -> str:
         house_number = receipt["house_number"]
         house_suffix = f"_CasaNo_{house_number}" if house_number else ""
         base_name = f"{receipt['receipt_no']}{house_suffix}_{month_year}"
+    elif (
+        receipt["direction"] == "EGRESO"
+        and "salario quincenal" in str(receipt["concept_name"] or "").lower()
+    ):
+        fortnight = salary_fortnight_prefix(receipt)
+        employee = compact_person_name(receipt["receiver_name"])
+        return f"{fortnight}{month.title()}{year}_{employee}.pdf"
     else:
         concept = unicodedata.normalize("NFKD", receipt["concept_name"] or "")
         concept = "".join(char for char in concept if not unicodedata.combining(char))
@@ -1657,6 +1768,8 @@ def render_properties(conn, query) -> str:
         <tr>
           <td>Casa {row['house_number']}</td>
           <td>{esc(row['owner_name'])}</td>
+          <td>{esc(row['phone_number']) or '<span class="muted">Pendiente</span>'}</td>
+          <td>{status_badge(row['whatsapp_enabled'])}</td>
           <td>{status_badge(row['active'], row['is_deleted'])}</td>
           <td>{esc_text(row['notes'])}</td>
           <td>{format_date(row['updated_at'][:10]) if row['updated_at'] else ''}</td>
@@ -1674,7 +1787,7 @@ def render_properties(conn, query) -> str:
         for row in properties
     )
     if not rows:
-        rows = '<tr><td colspan="6" class="muted">No hay propiedades registradas.</td></tr>'
+        rows = '<tr><td colspan="8" class="muted">No hay propiedades registradas.</td></tr>'
     return page(
         "Propiedades",
         f"""
@@ -1686,7 +1799,7 @@ def render_properties(conn, query) -> str:
           </div>
           <div class="table-wrap">
             <table class="properties-table">
-              <thead><tr><th>Casa</th><th>Responsable</th><th>Estado</th><th>Notas</th><th>Actualizado</th><th>Acciones</th></tr></thead>
+              <thead><tr><th>Casa</th><th>Responsable</th><th>No. telefono</th><th>WhatsApp</th><th>Estado</th><th>Notas</th><th>Actualizado</th><th>Acciones</th></tr></thead>
               <tbody>{rows}</tbody>
             </table>
           </div>
@@ -1731,6 +1844,13 @@ def render_property_form(conn, property_id: int | None = None) -> str:
             {hidden}
             <label>Numero de casa <input name="house_number" type="number" min="1" value="{esc(row['house_number'] if row else '')}" required></label>
             <label>Responsable <input name="owner_name" value="{esc(row['owner_name'] if row else '')}" required></label>
+            <label>No. telefono
+              <input name="phone_number" type="tel" inputmode="tel" placeholder="5555-5555" value="{esc(row['phone_number'] if row else '')}">
+            </label>
+            <label>Envio por WhatsApp
+              <select name="whatsapp_enabled">{active_options(row['whatsapp_enabled'] if row else 0)}</select>
+            </label>
+            <p class="muted">Al activarlo, los recibos de ingreso de esta casa mostraran el boton para preparar el mensaje en WhatsApp. El envio siempre requiere confirmacion manual.</p>
             {active_field}
             <label>Notas <textarea name="notes" rows="4">{esc(row['notes'] if row else '')}</textarea></label>
             <div class="actions">
@@ -3278,6 +3398,8 @@ def render_receipt(conn, receipt_id: int) -> str:
             m.reference,
             m.description,
             p.house_number,
+            p.phone_number,
+            p.whatsapp_enabled,
             p.notes AS property_notes,
             c.name AS concept_name,
             c.frequency AS frequency
@@ -3306,6 +3428,17 @@ def render_receipt(conn, receipt_id: int) -> str:
       f'<option value="{month}"{selected_attr(month, receipt_month)}>{esc(name.title())}</option>'
       for month, name in MONTHS.items()
     )
+    whatsapp_action = ""
+    if (
+        receipt["direction"] == "INGRESO"
+        and receipt["phone_number"]
+        and receipt["whatsapp_enabled"]
+    ):
+        whatsapp_action = (
+            f'<button class="button whatsapp" type="button" '
+            f'onclick="prepareWhatsApp(this, {receipt_id}, \'/receipt/{receipt_id}.pdf\')">'
+            'Descargar PDF y abrir WhatsApp en Firefox</button>'
+        )
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -3319,6 +3452,7 @@ def render_receipt(conn, receipt_id: int) -> str:
     <div class="receipt-actions">
       <a class="button" href="/receipts">Volver</a>
       <a class="button" href="/receipt/{receipt_id}.pdf">Descargar PDF con evidencia</a>
+      {whatsapp_action}
       <button class="button primary" onclick="window.print()">Guardar {esc(pdf_filename)}</button>
     </div>
     <form class="receipt-preview-controls" method="post" action="/receipt/update">
@@ -3370,6 +3504,36 @@ def render_receipt(conn, receipt_id: int) -> str:
       </footer>
     </article>
   </main>
+  <script>
+    function downloadReceipt(url) {{
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }}
+
+    async function prepareWhatsApp(button, receiptId, pdfUrl) {{
+      downloadReceipt(pdfUrl);
+      button.disabled = true;
+      var originalText = button.textContent;
+      button.textContent = 'Abriendo Firefox...';
+      try {{
+        var response = await fetch('/receipt/whatsapp', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+          body: new URLSearchParams({{receipt_id: receiptId}})
+        }});
+        if (!response.ok) throw new Error('No se pudo abrir Firefox.');
+      }} catch (error) {{
+        window.alert(error.message);
+      }} finally {{
+        button.disabled = false;
+        button.textContent = originalText;
+      }}
+    }}
+  </script>
 </body>
 </html>"""
 
@@ -3542,12 +3706,40 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.update_receipt(conn, data)
                     receipt_id = parse_int(data.get("receipt_id"))
                     self.redirect(f"/receipt/{receipt_id}")
+                elif parsed.path == "/receipt/whatsapp":
+                    self.open_receipt_whatsapp(conn, data)
+                    self.send_json({"ok": True})
                 else:
                     body, status = error_page("Ruta no encontrada.", 404)
                     self.send_html(body, status)
         except Exception as exc:
             body, status = error_page(str(exc), 400)
             self.send_html(body, status)
+
+    def open_receipt_whatsapp(self, conn, data) -> None:
+        receipt_id = parse_int(data.get("receipt_id"))
+        receipt = conn.execute(
+            """
+            SELECT r.receipt_no, r.issued_date, r.direction, r.receipt_month,
+                   r.payer_name, m.amount_cents, m.period_month, m.period_year,
+                   p.phone_number, p.whatsapp_enabled
+            FROM receipts r
+            JOIN movements m ON m.id = r.movement_id
+            LEFT JOIN properties p ON p.id = m.property_id
+            WHERE r.id = ? AND r.is_deleted = 0 AND m.is_deleted = 0
+            """,
+            (receipt_id,),
+        ).fetchone()
+        if not receipt:
+            raise ValueError("Recibo no encontrado.")
+        if receipt["direction"] != "INGRESO":
+            raise ValueError("WhatsApp solo esta disponible para recibos de ingreso.")
+        if not receipt["whatsapp_enabled"] or not receipt["phone_number"]:
+            raise ValueError("WhatsApp esta inactivo para esta propiedad.")
+        url = whatsapp_url(
+            receipt["phone_number"], receipt_whatsapp_message(receipt)
+        )
+        open_url_in_firefox(url)
 
     def update_receipt(self, conn, data) -> None:
         receipt_id = parse_int(data.get("receipt_id"))
@@ -3578,14 +3770,23 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         return {key: values[0].strip() for key, values in parsed.items()}
 
     def add_property(self, conn, data) -> None:
+        phone_number = normalize_phone_number(data.get("phone_number", ""))
+        whatsapp_enabled = parse_int(data.get("whatsapp_enabled")) or 0
+        if whatsapp_enabled and not phone_number:
+            raise ValueError("Debe registrar un numero de telefono para activar WhatsApp.")
         conn.execute(
             """
-            INSERT INTO properties (house_number, owner_name, notes, updated_at, created_by, updated_by)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+            INSERT INTO properties (
+                house_number, owner_name, phone_number, whatsapp_enabled,
+                notes, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
             """,
             (
                 parse_int(data.get("house_number")),
                 data.get("owner_name", ""),
+                phone_number,
+                whatsapp_enabled,
                 data.get("notes", ""),
                 CURRENT_USER,
                 CURRENT_USER,
@@ -3593,12 +3794,18 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         )
 
     def update_property(self, conn, data) -> None:
+        phone_number = normalize_phone_number(data.get("phone_number", ""))
+        whatsapp_enabled = parse_int(data.get("whatsapp_enabled")) or 0
+        if whatsapp_enabled and not phone_number:
+            raise ValueError("Debe registrar un numero de telefono para activar WhatsApp.")
         conn.execute(
             """
             UPDATE properties
             SET
                 house_number = ?,
                 owner_name = ?,
+                phone_number = ?,
+                whatsapp_enabled = ?,
                 active = ?,
                 notes = ?,
                 updated_at = CURRENT_TIMESTAMP,
@@ -3609,6 +3816,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             (
                 parse_int(data.get("house_number")),
                 data.get("owner_name", ""),
+                phone_number,
+                whatsapp_enabled,
                 parse_int(data.get("active")) or 0,
                 data.get("notes", ""),
                 CURRENT_USER,

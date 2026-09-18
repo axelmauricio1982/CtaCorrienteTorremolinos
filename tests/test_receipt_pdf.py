@@ -79,6 +79,41 @@ class ReceiptPdfTests(unittest.TestCase):
         ):
             self.assertIn(expected, text)
 
+    def test_salary_receipt_filename_identifies_fortnight_and_employee(self):
+        base_receipt = {
+            "receipt_month": 9,
+            "period_month": 9,
+            "period_year": 2026,
+            "issued_date": "2026-09-16",
+            "direction": "EGRESO",
+            "frequency": "MENSUAL",
+            "house_number": None,
+            "receipt_no": "R-2026-0012",
+            "concept_name": "Salario quincenal",
+            "concept_text": "",
+            "reference": "",
+        }
+
+        first_fortnight = {
+            **base_receipt,
+            "receiver_name": "Edwin López",
+            "description": "Pago de portería. Primera quincena de septiembre 2026",
+        }
+        second_fortnight = {
+            **base_receipt,
+            "receiver_name": "Juan de la Cruz",
+            "description": "Pago de portería. Segunda quincena de septiembre 2026",
+        }
+
+        self.assertEqual(
+            app.receipt_pdf_filename(first_fortnight),
+            "1erQuincenaSeptiembre2026_EdwinLópez.pdf",
+        )
+        self.assertEqual(
+            app.receipt_pdf_filename(second_fortnight),
+            "2daQuincenaSeptiembre2026_JuanDeLaCruz.pdf",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

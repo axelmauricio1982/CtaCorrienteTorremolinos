@@ -775,18 +775,22 @@ nav a:hover {
 .properties-table td:nth-child(1),
 .properties-table th:nth-child(3),
 .properties-table td:nth-child(3),
+.properties-table th:nth-child(4),
+.properties-table td:nth-child(4),
 .properties-table th:nth-child(5),
 .properties-table td:nth-child(5),
-.properties-table th:nth-child(6),
-.properties-table td:nth-child(6) {
+.properties-table th:nth-child(7),
+.properties-table td:nth-child(7),
+.properties-table th:nth-child(8),
+.properties-table td:nth-child(8) {
   white-space: nowrap;
   overflow-wrap: normal;
 }
 
 .properties-table th:nth-child(2),
 .properties-table td:nth-child(2),
-.properties-table th:nth-child(4),
-.properties-table td:nth-child(4) {
+.properties-table th:nth-child(6),
+.properties-table td:nth-child(6) {
   white-space: normal;
   overflow-wrap: break-word;
 }
@@ -826,6 +830,17 @@ button.primary {
 .button.primary:hover,
 button.primary:hover {
   background: var(--primary-strong);
+}
+
+.button.whatsapp {
+  background: #1f9d55;
+  border-color: #1f9d55;
+  color: #fff;
+}
+
+.button.whatsapp:hover {
+  background: #187b43;
+  border-color: #187b43;
 }
 
 .button.small,
@@ -1090,6 +1105,7 @@ tr:last-child td {
 
 .receipt-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   margin-bottom: 14px;

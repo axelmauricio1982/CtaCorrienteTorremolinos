@@ -9,6 +9,7 @@ Esta aplicación permite llevar la contabilidad operativa del residencial de for
 Incluye funcionalidades para:
 
 - Registrar propiedades
+- Registrar telefono y habilitar o deshabilitar WhatsApp por propiedad
 - Administrar empleados
 - Definir conceptos de ingreso y egreso
 - Configurar vigencias y montos fijos
@@ -18,6 +19,24 @@ Incluye funcionalidades para:
 - Descargar recibos PDF con sus evidencias anexas
 - Exportar información en CSV
 - Guardar evidencias localmente y sincronizarlas opcionalmente con OneDrive Personal
+
+## Envio de recibos por WhatsApp
+
+Cada propiedad tiene un numero de telefono y un control **Activo/Inactivo** para
+WhatsApp. Cuando esta activo, los recibos de ingreso asociados a esa casa
+muestran el boton **Descargar PDF y abrir WhatsApp en Firefox**, que descarga el
+recibo y abre WhatsApp Web en Firefox directamente en la conversacion del
+destinatario, con el texto listo. Esto no depende del navegador predeterminado;
+Firefox debe estar instalado y conservar la sesion de WhatsApp Web vinculada.
+
+Por seguridad, el mensaje no se envia automaticamente. Despues de pulsar el
+boton solo debes adjuntar el PDF descargado y confirmar el envio. La casa 1
+queda habilitada para pruebas; las demas casas quedan inactivas hasta que se
+habiliten desde **Propiedades > Editar**.
+
+El envio completamente automatico, incluido el archivo PDF, requiere una cuenta
+de WhatsApp Business y la API oficial de Meta; una cuenta personal no ofrece
+esa automatizacion.
 
 ## Requisitos
 
@@ -61,24 +80,43 @@ Al recompilar, el constructor conserva cualquier base que ya exista dentro de
 No muevas solamente `Torremolinos.exe` después de comenzar a usarlo: mueve toda
 la carpeta `dist` para conservar también la base y las evidencias.
 
-## Linux y macOS
+## Linux
 
-Para iniciar directamente con Python en Linux o macOS:
+Para iniciar directamente con Python en Linux:
 
 ```bash
 bash ./iniciar_torremolinos.sh
 ```
 
-Para generar un ejecutable autónomo nativo del sistema actual:
+Para generar un ejecutable autónomo nativo de Linux:
 
 ```bash
 bash ./build_unix.sh
 ```
 
-El resultado queda en `dist/Torremolinos`. PyInstaller no genera binarios
-multiplataforma: el ejecutable de Linux debe construirse en Linux y el de macOS
-debe construirse en macOS. En ambos casos la base y las evidencias permanecen
-en `dist/data` y utilizan el mismo flujo Push/Pull que Windows.
+El resultado queda en `dist/Torremolinos`. Debe construirse directamente en
+Linux porque PyInstaller no genera binarios multiplataforma. La base y las
+evidencias permanecen en `dist/data` y utilizan el mismo flujo Push/Pull que
+Windows.
+
+## Aplicación para macOS
+
+Para generar una aplicación nativa que se pueda abrir con doble clic y no
+requiera iniciar el servidor manualmente:
+
+```bash
+./build_macos.sh
+```
+
+El resultado queda en `dist/Torremolinos.app`. Al abrirlo, inicia el servidor y
+abre automáticamente la aplicación en el navegador. La base de datos y los
+comprobantes se conservan en `dist/data`, fuera del paquete `.app`, para que no
+se pierdan al recompilarlo.
+
+La compilación es nativa para la arquitectura del Mac que la genera. Al mover
+la aplicación, mueve juntos `Torremolinos.app` y la carpeta `data`. Los
+artefactos de `dist/`, `build/` y los archivos `.spec` son locales y están
+excluidos de GitHub.
 
 ## OneDrive Personal
 

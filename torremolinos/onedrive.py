@@ -16,6 +16,11 @@ except ImportError:  # La interfaz explica como instalar la dependencia opcional
     msal = None
 
 try:
+    import requests
+except ImportError:  # MSAL instala requests como dependencia.
+    requests = None
+
+try:
     import certifi
 except ImportError:  # MSAL normalmente ya instala certifi como dependencia.
     certifi = None
@@ -89,10 +94,18 @@ def _save_cache(cache, cache_path: Path) -> None:
 
 
 def _application(cache):
+    http_client = None
+    if requests is not None:
+        # Some frozen macOS builds fail while urllib3 decompresses Microsoft's
+        # discovery response. Identity encoding avoids that packaging-specific
+        # failure without changing the TLS connection or response contents.
+        http_client = requests.Session()
+        http_client.headers["Accept-Encoding"] = "identity"
     return msal.PublicClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
         token_cache=cache,
+        http_client=http_client,
     )
 
 

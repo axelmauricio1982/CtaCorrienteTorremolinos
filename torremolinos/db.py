@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS properties (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     house_number INTEGER NOT NULL UNIQUE,
     owner_name TEXT NOT NULL,
+    phone_number TEXT NOT NULL DEFAULT '',
+    whatsapp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (whatsapp_enabled IN (0, 1)),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     is_deleted INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
     notes TEXT NOT NULL DEFAULT '',
@@ -177,22 +179,24 @@ CREATE TABLE IF NOT EXISTS cash_settings (
 
 
 PROPERTIES = [
-    (1, "Axel Hernandez"),
-    (2, "Jissette Mordillo"),
-    (3, "Lesbia Aleman"),
-    (4, "Edgar Rolando y Gaby Garcia Galindo"),
-    (5, "Christian Flores"),
-    (6, "Mariano Funes"),
-    (7, "Lucy de Gudiel"),
-    (8, "Estelita Garcia"),
-    (9, "Edgar Hernandez"),
-    (10, "Laboratorio Vida"),
-    (11, "Jessica Sierra \"Lote\""),
-    (12, "Jessica Sierra"),
-    (13, "Jorge Mario Gomez"),
-    (14, "Victoria Galvez"),
-    (15, "Otto Cuevas"),
+    (1, "Axel Hernandez", "5223-2471", 1),
+    (2, "Jissette Mordillo", "", 0),
+    (3, "Lesbia Aleman", "", 0),
+    (4, "Edgar Rolando y Gaby Garcia Galindo", "", 0),
+    (5, "Christian Flores", "5205-1136", 0),
+    (6, "Mariano Funes", "4211-3574", 0),
+    (7, "Lucy de Gudiel", "5202-5954", 0),
+    (8, "Estelita Garcia", "5841-0466", 0),
+    (9, "Edgar Hernandez", "4150-9075", 0),
+    (10, "Laboratorio Vida", "3211-5099", 0),
+    (11, "Jessica Sierra \"Lote\"", "5962-7770", 0),
+    (12, "Jessica Sierra", "5514-1744", 0),
+    (13, "Jorge Mario Gomez", "5858-2517", 0),
+    (14, "Victoria Galvez", "4568-2041", 0),
+    (15, "Otto Cuevas", "5203-5100", 0),
 ]
+
+PROPERTY_PHONE_NUMBERS = {house: phone for house, _, phone, _ in PROPERTIES if phone}
 
 
 CONCEPTS = [
@@ -341,6 +345,13 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
 
     add_column_if_missing(conn, "employees", "start_date", "TEXT NOT NULL DEFAULT ''")
 
+    phone_column_added = add_column_if_missing(
+        conn, "properties", "phone_number", "TEXT NOT NULL DEFAULT ''"
+    )
+    whatsapp_column_added = add_column_if_missing(
+        conn, "properties", "whatsapp_enabled", "INTEGER NOT NULL DEFAULT 0"
+    )
+
     for table in (
         "properties",
         "employees",
@@ -367,6 +378,24 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
                 updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CURRENT_TIMESTAMP),
                 created_by = COALESCE(NULLIF(created_by, ''), 'ADM'),
                 updated_by = COALESCE(NULLIF(updated_by, ''), 'ADM')
+            """
+        )
+
+    if phone_column_added:
+        conn.executemany(
+            """
+            UPDATE properties
+            SET phone_number = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE house_number = ?
+            """,
+            [(phone, house) for house, phone in PROPERTY_PHONE_NUMBERS.items()],
+        )
+    if whatsapp_column_added:
+        conn.execute(
+            """
+            UPDATE properties
+            SET whatsapp_enabled = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE house_number = 1
             """
         )
 
@@ -402,13 +431,15 @@ def add_column_if_missing(
     table: str,
     column: str,
     definition: str,
-) -> None:
+) -> bool:
     columns = {
         row["name"]
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
     }
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        return True
+    return False
 
 
 def seed_properties(conn: sqlite3.Connection) -> None:
@@ -417,8 +448,8 @@ def seed_properties(conn: sqlite3.Connection) -> None:
         return
     conn.executemany(
         """
-        INSERT INTO properties (house_number, owner_name)
-        VALUES (?, ?)
+        INSERT INTO properties (house_number, owner_name, phone_number, whatsapp_enabled)
+        VALUES (?, ?, ?, ?)
         """,
         PROPERTIES,
     )
