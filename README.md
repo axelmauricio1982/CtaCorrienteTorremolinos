@@ -154,13 +154,19 @@ Este permiso limita el acceso a la carpeta privada de `CtaCorrienteTorremolinos`
 
 Después de instalar las dependencias e iniciar el servidor, abre **Inicio > Configurar OneDrive > Conectar OneDrive Personal**. Microsoft mostrará un código y solicitará el consentimiento la primera vez.
 
-Como compatibilidad adicional, si existe un cliente de OneDrive instalado, la aplicación también puede copiar el archivo a la carpeta sincronizada:
+Como compatibilidad adicional, si existe un cliente de OneDrive instalado, la aplicación también puede copiar el archivo a la carpeta sincronizada, dentro de:
 
 ```text
-/Users/axll/OneDrive/Torremolinos/Evidencias
+<carpeta de OneDrive>/Torremolinos/Evidencias
 ```
 
-La ruta predeterminada es `OneDrive/Torremolinos/Evidencias`. Para usar otra ubicación, configura `ONEDRIVE_LOCAL_FOLDER` antes de iniciar la aplicación.
+La carpeta de OneDrive se detecta automáticamente sin configuración, según el sistema operativo:
+
+- **Windows:** usa la variable de entorno `OneDriveConsumer` (o `OneDrive`) que el propio cliente de Microsoft configura al iniciar sesión.
+- **macOS:** usa `~/Library/CloudStorage/OneDrive-Personal`, la ruta del cliente actual de OneDrive; si no existe, usa `~/OneDrive` (clientes antiguos).
+- **Linux:** usa `~/OneDrive`, la ruta habitual de los clientes no oficiales.
+
+Para forzar otra ubicación, configura `ONEDRIVE_LOCAL_FOLDER` antes de iniciar la aplicación:
 
 macOS/Linux:
 

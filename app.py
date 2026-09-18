@@ -78,13 +78,35 @@ def application_base_dir() -> Path:
     return _git_toplevel(executable_dir) or executable_dir
 
 
+def default_onedrive_local_folder() -> Path:
+    home = Path.home()
+    if sys.platform == "win32":
+        # Windows expone la carpeta sincronizada de OneDrive Personal en estas
+        # variables de entorno; evita adivinar la ruta.
+        for variable in ("OneDriveConsumer", "OneDrive"):
+            configured = os.environ.get(variable)
+            if configured:
+                return Path(configured)
+        return home / "OneDrive"
+    if sys.platform == "darwin":
+        # El cliente actual de OneDrive en macOS sincroniza aqui; versiones
+        # antiguas usaban ~/OneDrive directamente.
+        cloud_storage = home / "Library" / "CloudStorage" / "OneDrive-Personal"
+        if cloud_storage.is_dir():
+            return cloud_storage
+        return home / "OneDrive"
+    return home / "OneDrive"
+
+
 BASE_DIR = application_base_dir()
 DEFAULT_DB = BASE_DIR / "data" / "torremolinos.sqlite3"
 APP_NAME = "Residencial Torremolinos"
 CURRENT_USER = "ADM"
 PAGE_SIZE = 10
 ATTACHMENT_DIR = BASE_DIR / "data" / "attachments"
-ONEDRIVE_LOCAL_FOLDER = Path(os.environ.get("ONEDRIVE_LOCAL_FOLDER", str(Path.home() / "OneDrive")))
+ONEDRIVE_LOCAL_FOLDER = Path(
+    os.environ.get("ONEDRIVE_LOCAL_FOLDER", str(default_onedrive_local_folder()))
+)
 ONEDRIVE_EVIDENCE_DIR = ONEDRIVE_LOCAL_FOLDER / "Torremolinos" / "Evidencias"
 ONEDRIVE_TOKEN_CACHE = BASE_DIR / ".onedrive-token-cache.json"
 SYNC_STATE_FILE = BASE_DIR / ".torremolinos-sync.json"
