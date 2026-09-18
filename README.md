@@ -61,6 +61,21 @@ Luego abre esta dirección en el navegador:
 http://127.0.0.1:8000
 ```
 
+## Una sola base de datos por instalación
+
+Si el ejecutable (`Torremolinos.app`, `Torremolinos.exe` o `Torremolinos` en
+Linux) se encuentra dentro de un clon de este repositorio de git —como
+`dist/` durante el desarrollo—, la aplicación usa la carpeta `data/` de la
+raíz del repositorio, la misma que utiliza `python3 app.py`. Así, sin
+importar cuál de las dos formas uses para iniciar el sistema en esa máquina,
+siempre lees y escribes la misma base de datos, y es esa la que viaja por
+Push/Pull a GitHub.
+
+Solamente cuando el ejecutable se copia de forma portátil, fuera de cualquier
+clon de git, la base de datos y las evidencias se guardan junto a él (en
+`dist/data` o donde quede el ejecutable), como respaldo para esa instalación
+aislada.
+
 ## Ejecutable para Windows
 
 Para generar una versión portátil que no requiera una instalación separada de Python:
@@ -70,15 +85,18 @@ powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
 ```
 
 El resultado queda en `dist\Torremolinos.exe`. Al abrirlo, inicia el servidor y
-abre automáticamente la aplicación en el navegador. La base de datos y los
-comprobantes se conservan en `dist\data`, fuera del ejecutable, para que no se
-pierdan al actualizarlo.
+abre automáticamente la aplicación en el navegador. Si `dist` sigue dentro de
+tu clon de git, los datos se guardan en `data\` en la raíz del repositorio
+(ver [Una sola base de datos por instalación](#una-sola-base-de-datos-por-instalación));
+si copiaste solamente el ejecutable fuera del repositorio, los datos quedan
+junto a él en `dist\data`.
 
 Al recompilar, el constructor conserva cualquier base que ya exista dentro de
 `dist\data` y agrega las evidencias disponibles en el proyecto.
 
-No muevas solamente `Torremolinos.exe` después de comenzar a usarlo: mueve toda
-la carpeta `dist` para conservar también la base y las evidencias.
+No muevas solamente `Torremolinos.exe` después de comenzar a usarlo si lo
+copiaste de forma portátil: mueve toda la carpeta `dist` para conservar
+también la base y las evidencias.
 
 ## Linux
 
@@ -96,8 +114,9 @@ bash ./build_unix.sh
 
 El resultado queda en `dist/Torremolinos`. Debe construirse directamente en
 Linux porque PyInstaller no genera binarios multiplataforma. La base y las
-evidencias permanecen en `dist/data` y utilizan el mismo flujo Push/Pull que
-Windows.
+evidencias siguen la misma regla que en Windows y macOS (ver
+[Una sola base de datos por instalación](#una-sola-base-de-datos-por-instalación))
+y utilizan el mismo flujo Push/Pull.
 
 ## Aplicación para macOS
 
@@ -109,12 +128,16 @@ requiera iniciar el servidor manualmente:
 ```
 
 El resultado queda en `dist/Torremolinos.app`. Al abrirlo, inicia el servidor y
-abre automáticamente la aplicación en el navegador. La base de datos y los
-comprobantes se conservan en `dist/data`, fuera del paquete `.app`, para que no
-se pierdan al recompilarlo.
+abre automáticamente la aplicación en el navegador. Si `dist` sigue dentro de
+tu clon de git (como en desarrollo), la base de datos y los comprobantes se
+guardan en `data/` en la raíz del repositorio (ver
+[Una sola base de datos por instalación](#una-sola-base-de-datos-por-instalación));
+si copiaste solamente `Torremolinos.app` fuera del repositorio, quedan junto a
+él en `dist/data`, para que no se pierdan al recompilarlo.
 
-La compilación es nativa para la arquitectura del Mac que la genera. Al mover
-la aplicación, mueve juntos `Torremolinos.app` y la carpeta `data`. Los
+La compilación es nativa para la arquitectura del Mac que la genera. Si
+copiaste la aplicación de forma portátil, mueve juntos `Torremolinos.app` y la
+carpeta `data`. Los
 artefactos de `dist/`, `build/` y los archivos `.spec` son locales y están
 excluidos de GitHub.
 

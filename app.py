@@ -39,6 +39,21 @@ IS_FROZEN = bool(getattr(sys, "frozen", False))
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 
+def _git_toplevel(start: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=start,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
 def application_base_dir() -> Path:
     if not IS_FROZEN:
         return RESOURCE_DIR
@@ -51,8 +66,16 @@ def application_base_dir() -> Path:
         and executable.parent.name == "MacOS"
         and executable.parent.parent.name == "Contents"
     ):
-        return executable.parents[3]
-    return executable.parent
+        executable_dir = executable.parents[3]
+    else:
+        executable_dir = executable.parent
+    # When the compiled app lives inside a git checkout of this project (as
+    # with dist/ during development), use the repository root instead of the
+    # executable's own folder. Otherwise python3 app.py and the compiled app
+    # would each keep a separate, silently diverging database on the same
+    # machine. A truly standalone copy with no git repo around it falls back
+    # to keeping its data beside the executable.
+    return _git_toplevel(executable_dir) or executable_dir
 
 
 BASE_DIR = application_base_dir()
