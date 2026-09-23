@@ -682,14 +682,6 @@ nav a:hover {
   width: 110px;
 }
 
-.movements-table th:nth-child(7),
-.movements-table td:nth-child(7) {
-  width: 135px;
-  max-width: 135px;
-  white-space: normal;
-  overflow-wrap: break-word;
-}
-
 .movements-table th:nth-child(8),
 .movements-table td:nth-child(8) {
   width: 125px;
@@ -947,6 +939,13 @@ textarea:focus {
 
 .check input {
   width: auto;
+}
+
+.col-reference {
+  width: 135px;
+  max-width: 135px;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 table {

@@ -1773,7 +1773,7 @@ def render_dashboard(conn, query) -> str:
                   <th>Concepto</th>
                   <th>Ingreso</th>
                   <th>Egreso</th>
-                  <th>Referencia</th>
+                  <th class="col-reference">Referencia</th>
                   <th>Recibo</th>
                 </tr>
               </thead>
@@ -2454,7 +2454,7 @@ def render_movements(conn, query) -> str:
             <table class="movements-table">
               <thead>
                 <tr>
-                  <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th><th>Acciones</th>
+                  <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th class="col-reference">Referencia</th><th>Recibo</th><th>Acciones</th>
                 </tr>
               </thead>
               <tbody>{rows}</tbody>
@@ -2577,7 +2577,7 @@ def movement_row(row, include_balance: bool, running_balance: int | None = None,
           <td>{esc(counterparty)}</td>
           <td>{income}</td>
           <td>{expense}</td>
-          <td>{esc(row['reference'])}</td>
+          <td class="col-reference">{esc(row['reference'])}</td>
           <td>{receipt}</td>
           <td class="actions">
             <a class="button small" href="/movements/edit?id={row['id']}">Editar</a>
@@ -2596,7 +2596,7 @@ def movement_row(row, include_balance: bool, running_balance: int | None = None,
       <td>{esc(row['concept_name'])}</td>
       <td>{income}</td>
       <td>{expense}</td>
-      <td>{esc(row['reference'])}</td>
+      <td class="col-reference">{esc(row['reference'])}</td>
       <td>{receipt}</td>
       {balance_cell}
     </tr>
@@ -3061,7 +3061,7 @@ def render_reports(conn, query) -> str:
           </div>
           <div class="table-wrap report-month-table" data-row-count="{item['movement_count']}">
             <table class="movements-table">
-              <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Referencia</th><th>Recibo</th><th>Acciones</th></tr></thead>
+              <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th class="col-reference">Referencia</th><th>Recibo</th><th>Acciones</th></tr></thead>
               <tbody>{item['details']}</tbody>
             </table>
           </div>
@@ -3214,7 +3214,7 @@ def render_cashflow(conn, query) -> str:
           <td>{format_money(row['amount_cents']) if row['direction'] == 'INGRESO' else '-'}</td>
           <td>{format_money(row['amount_cents']) if row['direction'] == 'EGRESO' else '-'}</td>
           <td>{format_money(running)}</td>
-          <td>{esc(row['reference'])}</td>
+          <td class="col-reference">{esc(row['reference'])}</td>
           <td>{receipt}</td>
         </tr>
         """
@@ -3256,7 +3256,7 @@ def render_cashflow(conn, query) -> str:
             <table>
               <thead>
                 <tr>
-                  <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Saldo acumulado</th><th>Referencia</th><th>Recibo</th>
+                  <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Saldo acumulado</th><th class="col-reference">Referencia</th><th>Recibo</th>
                 </tr>
               </thead>
               <tbody>{table_rows}</tbody>
