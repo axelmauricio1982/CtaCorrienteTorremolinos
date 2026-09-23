@@ -300,6 +300,16 @@ CONCEPTS = [
         "requires_receipt": 0,
         "notes": "Gastos de pintura o mantenimiento de areas comunes.",
     },
+    {
+        "name": "Salario quincenal",
+        "direction": "EGRESO",
+        "amount_mode": "FIJO",
+        "frequency": "EVENTUAL",
+        "suggested_month_start": None,
+        "suggested_month_end": None,
+        "requires_receipt": 1,
+        "notes": "Trabajo de portería",
+    },
 ]
 
 
@@ -472,8 +482,11 @@ def seed_employees(conn: sqlite3.Connection) -> None:
 
 
 def seed_concepts(conn: sqlite3.Connection) -> None:
-    existing = conn.execute("SELECT COUNT(*) FROM concepts").fetchone()[0]
-    if existing:
+    existing_names = {
+        row["name"] for row in conn.execute("SELECT name FROM concepts").fetchall()
+    }
+    missing = [concept for concept in CONCEPTS if concept["name"] not in existing_names]
+    if not missing:
         return
     conn.executemany(
         """
@@ -498,7 +511,7 @@ def seed_concepts(conn: sqlite3.Connection) -> None:
             :notes
         )
         """,
-        CONCEPTS,
+        missing,
     )
 
 

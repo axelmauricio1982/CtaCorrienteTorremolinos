@@ -419,6 +419,8 @@ def receipt_pdf_filename(receipt) -> str:
         house_number = receipt["house_number"]
         house_suffix = f"_CasaNo_{house_number}" if house_number else ""
         base_name = f"{receipt['receipt_no']}{house_suffix}_{month_year}"
+        if "parqueo" in str(receipt["concept_name"] or "").lower():
+            base_name += "Parqueo"
     elif (
         receipt["direction"] == "EGRESO"
         and "salario quincenal" in str(receipt["concept_name"] or "").lower()
@@ -643,6 +645,8 @@ def receipt_concept_text(movement) -> str:
       )
 
     if movement["direction"] == "INGRESO":
+      if "parqueo" in normalized_name:
+        return "Pago por uso de un parqueo en Residencial Torremolinos."
       property_notes = str(movement["property_notes"] or "").strip()
       return property_notes or "Pago de mantenimiento y seguridad."
 
