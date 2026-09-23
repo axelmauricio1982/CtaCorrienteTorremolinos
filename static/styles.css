@@ -649,8 +649,6 @@ nav a:hover {
 .movements-table td:nth-child(5),
 .movements-table th:nth-child(6),
 .movements-table td:nth-child(6),
-.movements-table th:nth-child(7),
-.movements-table td:nth-child(7),
 .movements-table th:nth-child(8),
 .movements-table td:nth-child(8) {
   white-space: nowrap;
@@ -686,7 +684,10 @@ nav a:hover {
 
 .movements-table th:nth-child(7),
 .movements-table td:nth-child(7) {
-  min-width: 135px;
+  width: 135px;
+  max-width: 135px;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .movements-table th:nth-child(8),
@@ -948,10 +949,6 @@ textarea:focus {
   width: auto;
 }
 
-.table-wrap {
-  overflow-x: hidden;
-}
-
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1057,6 +1054,17 @@ tr:last-child td {
 .badge.inactive-status {
   background: #fff5dc;
   color: var(--warning);
+}
+
+.attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--surface-muted);
+  color: var(--muted);
 }
 
 .badge.deleted {

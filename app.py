@@ -1686,7 +1686,8 @@ def render_dashboard(conn, query) -> str:
     balance = cash_balance(conn)
     last_movements = conn.execute(
         """
-        SELECT m.*, c.name AS concept_name, r.id AS receipt_id, r.receipt_no
+        SELECT m.*, c.name AS concept_name, r.id AS receipt_id, r.receipt_no,
+               (SELECT COUNT(*) FROM movement_attachments a WHERE a.movement_id = m.id) AS attachment_count
         FROM movements m
         JOIN concepts c ON c.id = m.concept_id
         LEFT JOIN receipts r ON r.movement_id = m.id
@@ -2366,7 +2367,8 @@ def render_movements(conn, query) -> str:
             r.receipt_no,
             p.house_number,
             p.owner_name,
-            e.name AS employee_name
+            e.name AS employee_name,
+            (SELECT COUNT(*) FROM movement_attachments a WHERE a.movement_id = m.id) AS attachment_count
         FROM movements m
         JOIN concepts c ON c.id = m.concept_id
         LEFT JOIN receipts r ON r.movement_id = m.id
@@ -2483,6 +2485,16 @@ def render_movement_form(conn, movement_id: int) -> str:
         "SELECT * FROM employees WHERE (active = 1 AND is_deleted = 0) OR id = ? ORDER BY name",
         (movement["employee_id"],),
     ).fetchall()
+    attachments = conn.execute(
+        "SELECT original_name FROM movement_attachments WHERE movement_id = ? ORDER BY uploaded_at, id",
+        (movement_id,),
+    ).fetchall()
+    attachments_note = (
+        f'<p class="muted">📎 Ya tiene {len(attachments)} archivo(s) adjunto(s): '
+        f'{esc(", ".join(a["original_name"] for a in attachments))}</p>'
+        if attachments
+        else ""
+    )
     return page(
         "Editar movimiento",
         f"""
@@ -2522,6 +2534,7 @@ def render_movement_form(conn, movement_id: int) -> str:
               <label>Referencia <input name="reference" value="{esc(movement['reference'])}"></label>
             </div>
             <label>Descripcion <textarea name="description" rows="3">{esc(movement['description'])}</textarea></label>
+            {attachments_note}
             <label>Agregar comprobante / evidencia
               <input type="file" name="attachment" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf">
             </label>
@@ -2539,8 +2552,15 @@ def render_movement_form(conn, movement_id: int) -> str:
 def movement_row(row, include_balance: bool, running_balance: int | None = None, detail: bool = False) -> str:
     income = format_money(row["amount_cents"]) if row["direction"] == "INGRESO" else "-"
     expense = format_money(row["amount_cents"]) if row["direction"] == "EGRESO" else "-"
+    attachment_count = int(row_value(row, "attachment_count", 0) or 0)
+    attachment_badge = (
+        f' <span class="attachment-badge" title="{attachment_count} archivo(s) adjunto(s)">'
+        f'📎{attachment_count}</span>'
+        if attachment_count
+        else ""
+    )
     receipt = (
-        f'<a href="/receipt/{row["receipt_id"]}">{esc(row["receipt_no"])}</a>'
+        f'<a href="/receipt/{row["receipt_id"]}">{esc(row["receipt_no"])}</a>{attachment_badge}'
         if row["receipt_id"]
         else '<span class="muted">No aplica</span>'
     )
@@ -2877,7 +2897,8 @@ def report_movements(conn, start: str, end: str, property_id: int | None = None)
     return conn.execute(
       f"""
       SELECT m.*, c.name AS concept_name, r.id AS receipt_id, r.receipt_no,
-           p.house_number, p.owner_name, e.name AS employee_name
+           p.house_number, p.owner_name, e.name AS employee_name,
+           (SELECT COUNT(*) FROM movement_attachments a WHERE a.movement_id = m.id) AS attachment_count
       FROM movements m
       JOIN concepts c ON c.id = m.concept_id
       LEFT JOIN receipts r ON r.movement_id = m.id
