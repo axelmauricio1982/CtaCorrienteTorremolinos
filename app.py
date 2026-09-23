@@ -338,6 +338,15 @@ def format_money(cents: int | None) -> str:
     return f"Q {Decimal(cents) / Decimal(100):,.2f}"
 
 
+def attachment_badge_html(attachment_count: int) -> str:
+    if not attachment_count:
+        return ""
+    return (
+        f' <span class="attachment-badge" title="{attachment_count} archivo(s) adjunto(s)">'
+        f'📎{attachment_count}</span>'
+    )
+
+
 def format_date(value: str | None) -> str:
     if not value:
         return ""
@@ -2552,13 +2561,7 @@ def render_movement_form(conn, movement_id: int) -> str:
 def movement_row(row, include_balance: bool, running_balance: int | None = None, detail: bool = False) -> str:
     income = format_money(row["amount_cents"]) if row["direction"] == "INGRESO" else "-"
     expense = format_money(row["amount_cents"]) if row["direction"] == "EGRESO" else "-"
-    attachment_count = int(row_value(row, "attachment_count", 0) or 0)
-    attachment_badge = (
-        f' <span class="attachment-badge" title="{attachment_count} archivo(s) adjunto(s)">'
-        f'📎{attachment_count}</span>'
-        if attachment_count
-        else ""
-    )
+    attachment_badge = attachment_badge_html(int(row_value(row, "attachment_count", 0) or 0))
     receipt = (
         f'<a href="/receipt/{row["receipt_id"]}">{esc(row["receipt_no"])}</a>{attachment_badge}'
         if row["receipt_id"]
@@ -3164,7 +3167,8 @@ def render_cashflow(conn, query) -> str:
             r.receipt_no,
             p.house_number,
             p.owner_name,
-            e.name AS employee_name
+            e.name AS employee_name,
+            (SELECT COUNT(*) FROM movement_attachments a WHERE a.movement_id = m.id) AS attachment_count
         FROM movements m
         JOIN concepts c ON c.id = m.concept_id
         LEFT JOIN receipts r ON r.movement_id = m.id
@@ -3202,6 +3206,7 @@ def render_cashflow(conn, query) -> str:
         )
         receipt = (
             f'<a href="/receipt/{row["receipt_id"]}">{esc(row["receipt_no"])}</a>'
+            f'{attachment_badge_html(row["attachment_count"])}'
             if row["receipt_id"]
             else '<span class="muted">No aplica</span>'
         )
@@ -3253,7 +3258,7 @@ def render_cashflow(conn, query) -> str:
             <article class="metric"><span>Disponible final</span><strong class="{"positive" if running >= 0 else "negative"}">{format_money(running)}</strong></article>
           </section>
           <div class="table-wrap">
-            <table>
+            <table class="cashflow-table">
               <thead>
                 <tr>
                   <th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th>Saldo acumulado</th><th class="col-reference">Referencia</th><th>Recibo</th>
@@ -3402,7 +3407,8 @@ def render_receipts(conn, query) -> str:
         receipt_params = [start, end]
     rows = conn.execute(
         f"""
-        SELECT r.*, m.amount_cents, c.name AS concept_name
+        SELECT r.*, m.amount_cents, c.name AS concept_name,
+               (SELECT COUNT(*) FROM movement_attachments a WHERE a.movement_id = r.movement_id) AS attachment_count
         FROM receipts r
         JOIN movements m ON m.id = r.movement_id
         JOIN concepts c ON c.id = m.concept_id
@@ -3417,7 +3423,7 @@ def render_receipts(conn, query) -> str:
     table_rows = "".join(
         f"""
         <tr>
-          <td><a href="/receipt/{row['id']}">{esc(row['receipt_no'])}</a></td>
+          <td><a href="/receipt/{row['id']}">{esc(row['receipt_no'])}</a>{attachment_badge_html(row['attachment_count'])}</td>
           <td>{format_date(row['issued_date'])}</td>
           <td><span class="badge {row['direction'].lower()}">{row['direction'].title()}</span></td>
           <td>{esc(row['concept_name'])}</td>

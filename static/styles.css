@@ -705,6 +705,48 @@ nav a:hover {
   margin: 0;
 }
 
+.cashflow-table {
+  min-width: 1080px;
+}
+
+.cashflow-table th:nth-child(1),
+.cashflow-table td:nth-child(1) {
+  width: 100px;
+  white-space: nowrap;
+}
+
+.cashflow-table th:nth-child(2),
+.cashflow-table td:nth-child(2) {
+  width: 90px;
+  white-space: nowrap;
+}
+
+.cashflow-table th:nth-child(3),
+.cashflow-table td:nth-child(3) {
+  min-width: 170px;
+}
+
+.cashflow-table th:nth-child(4),
+.cashflow-table td:nth-child(4) {
+  min-width: 190px;
+}
+
+.cashflow-table th:nth-child(5),
+.cashflow-table td:nth-child(5),
+.cashflow-table th:nth-child(6),
+.cashflow-table td:nth-child(6),
+.cashflow-table th:nth-child(7),
+.cashflow-table td:nth-child(7) {
+  width: 115px;
+  white-space: nowrap;
+}
+
+.cashflow-table th:nth-child(9),
+.cashflow-table td:nth-child(9) {
+  width: 125px;
+  white-space: nowrap;
+}
+
 .table-wrap th,
 .table-wrap td {
   padding: 7px 9px;
