@@ -384,6 +384,18 @@ def resolve_attachment_path(attachment) -> Path:
     return ATTACHMENT_DIR / stored_name
 
 
+def load_attachment_bytes(conn, attachment_id: int) -> tuple[bytes, str]:
+    attachment = conn.execute(
+        "SELECT * FROM movement_attachments WHERE id = ?", (attachment_id,)
+    ).fetchone()
+    if not attachment:
+        raise ValueError("Evidencia no encontrada.")
+    path = resolve_attachment_path(attachment)
+    if not path.is_file():
+        raise ValueError("No se encontro el archivo local de esta evidencia.")
+    return path.read_bytes(), attachment["content_type"] or "application/octet-stream"
+
+
 def normalize_attachment_paths(conn) -> None:
     attachments = conn.execute(
         "SELECT id, stored_name, local_path FROM movement_attachments"
@@ -2495,12 +2507,24 @@ def render_movement_form(conn, movement_id: int) -> str:
         (movement["employee_id"],),
     ).fetchall()
     attachments = conn.execute(
-        "SELECT original_name FROM movement_attachments WHERE movement_id = ? ORDER BY uploaded_at, id",
+        "SELECT * FROM movement_attachments WHERE movement_id = ? ORDER BY uploaded_at, id",
         (movement_id,),
     ).fetchall()
+    attachment_items = "".join(
+        f"""
+        <li class="attachment-item">
+          <a class="attachment-preview-link" href="/attachments/{a['id']}/preview" target="_blank" rel="noopener">
+            {f'<img class="attachment-thumb" src="/attachments/{a["id"]}/preview" alt="Vista previa">' if str(a['content_type']).startswith('image/') else '📄'}
+            {esc(a['original_name'])}
+          </a>
+          <a class="button small danger" href="/movements/attachments/delete?id={a['id']}">Eliminar</a>
+        </li>
+        """
+        for a in attachments
+    )
     attachments_note = (
-        f'<p class="muted">📎 Ya tiene {len(attachments)} archivo(s) adjunto(s): '
-        f'{esc(", ".join(a["original_name"] for a in attachments))}</p>'
+        f'<div class="attachment-list"><p class="muted">📎 Ya tiene {len(attachments)} archivo(s) adjunto(s):</p>'
+        f'<ul>{attachment_items}</ul></div>'
         if attachments
         else ""
     )
@@ -2552,6 +2576,54 @@ def render_movement_form(conn, movement_id: int) -> str:
               <a class="button" href="/movements">Cancelar</a>
             </div>
           </form>
+        </section>
+        """,
+        "/movements",
+    )
+
+
+def render_delete_attachment_confirm(conn, attachment_id: int) -> str:
+    attachment = conn.execute(
+        "SELECT * FROM movement_attachments WHERE id = ?", (attachment_id,)
+    ).fetchone()
+    if not attachment:
+        raise ValueError("Evidencia no encontrada.")
+    movement = conn.execute(
+        """
+        SELECT m.*, c.name AS concept_name
+        FROM movements m JOIN concepts c ON c.id = m.concept_id
+        WHERE m.id = ?
+        """,
+        (attachment["movement_id"],),
+    ).fetchone()
+    is_image = str(attachment["content_type"]).startswith("image/")
+    preview = (
+        f'<img class="attachment-preview-large" src="/attachments/{attachment_id}/preview" alt="Vista previa">'
+        if is_image
+        else f'<iframe class="attachment-preview-large" src="/attachments/{attachment_id}/preview"></iframe>'
+    )
+    return page(
+        "Eliminar evidencia",
+        f"""
+        <section class="panel narrow">
+          <h2>¿Eliminar esta evidencia?</h2>
+          <p class="muted">
+            Pertenece al movimiento del {esc(format_date(movement['movement_date']))} -
+            {esc(movement['concept_name'])} ({format_money(movement['amount_cents'])}).
+          </p>
+          {preview}
+          <p><strong>{esc(attachment['original_name'])}</strong><br>
+          <span class="muted">Subido el {esc(attachment['uploaded_at'])}</span></p>
+          <p class="muted">Esta accion no se puede deshacer: el archivo se borra de esta computadora. Si ya se
+          habia sincronizado con OneDrive, esa copia remota no se elimina automaticamente.</p>
+          <div class="actions">
+            <form method="post" action="/movements/attachments/delete"
+                  onsubmit="return confirm('Esta es tu ultima confirmacion. ¿Eliminar esta evidencia de forma definitiva?');">
+              <input type="hidden" name="id" value="{attachment_id}">
+              <button class="button danger" type="submit">Si, eliminar esta evidencia</button>
+            </form>
+            <a class="button" href="/movements/edit?id={attachment['movement_id']}">Cancelar</a>
+          </div>
         </section>
         """,
         "/movements",
@@ -3659,6 +3731,12 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.send_html(render_movements(conn, query))
                 elif parsed.path == "/movements/edit":
                   self.send_html(render_movement_form(conn, parse_int(query.get("id", [""])[0])))
+                elif parsed.path.startswith("/attachments/") and parsed.path.endswith("/preview"):
+                  attachment_id = int(parsed.path.split("/")[2])
+                  content, content_type = load_attachment_bytes(conn, attachment_id)
+                  self.send_file_inline(content, content_type)
+                elif parsed.path == "/movements/attachments/delete":
+                  self.send_html(render_delete_attachment_confirm(conn, parse_int(query.get("id", [""])[0])))
                 elif parsed.path == "/accounts":
                     self.send_html(render_account_statement(conn, query))
                 elif parsed.path == "/reports":
@@ -3778,6 +3856,9 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 elif parsed.path == "/movements/delete":
                   self.delete_movement(conn, data)
                   self.redirect("/movements?ok=1")
+                elif parsed.path == "/movements/attachments/delete":
+                  movement_id = self.delete_movement_attachment(conn, data)
+                  self.redirect(f"/movements/edit?id={movement_id}")
                 elif parsed.path == "/receipt/update":
                     self.update_receipt(conn, data)
                     receipt_id = parse_int(data.get("receipt_id"))
@@ -4308,6 +4389,29 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
           )
           add_movement_log(conn, movement_id, "DELETED", "Movimiento eliminado logicamente.", CURRENT_USER)
 
+    def delete_movement_attachment(self, conn, data) -> int:
+          attachment_id = parse_int(data.get("id"))
+          if not attachment_id:
+            raise ValueError("Evidencia no encontrada.")
+          attachment = conn.execute(
+            "SELECT * FROM movement_attachments WHERE id = ?", (attachment_id,)
+          ).fetchone()
+          if not attachment:
+            raise ValueError("Evidencia no encontrada.")
+          movement_id = attachment["movement_id"]
+          path = resolve_attachment_path(attachment)
+          if path.is_file():
+            path.unlink()
+          conn.execute("DELETE FROM movement_attachments WHERE id = ?", (attachment_id,))
+          add_movement_log(
+            conn,
+            movement_id,
+            "COMMENTED",
+            f"Evidencia '{attachment['original_name']}' eliminada por el usuario.",
+            CURRENT_USER,
+          )
+          return movement_id
+
     def add_movement(self, conn, data) -> int | None:
         concept_id = parse_int(data.get("concept_id"))
         concept = conn.execute(
@@ -4430,6 +4534,14 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def send_file_inline(self, content: bytes, content_type: str):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(content)
 
