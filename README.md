@@ -254,3 +254,43 @@ Los catálogos usan borrado lógico para proteger el historial: en vez de elimin
 ## Estado del proyecto
 
 Es una versión funcional local, lista para continuar con mejoras y ampliaciones según las necesidades del residencial.
+
+## Períodos de los pagos
+
+En Movimientos, «Periodo mes» permite seleccionar un solo mes. El formulario
+abre con «Cuota ordinaria residencial» seleccionada. Al elegir una casa se
+propone el mes siguiente al último período pagado para esa casa y concepto,
+incluido el cambio de año. La sugerencia se puede modificar; si no existe
+historial, debe elegirse el mes manualmente. Los egresos no usan esta sugerencia.
+
+Las correcciones del mes desde el recibo actualizan también el movimiento y su
+bitácora. Los registros de varios meses creados con versiones anteriores se
+conservan y siguen apareciendo completos en sus recibos. La sugerencia no calcula
+deudas ni detecta huecos anteriores al último período pagado.
+
+## Matriz de cuotas por casa
+
+En Reportes, «Matriz de cuotas por casa» abre `/payment-status`: filas por casa,
+columnas de enero a diciembre, un único filtro de año para todas las casas, y descargas
+Excel (.xlsx) y PDF. El corte es automático: hoy para el año actual o futuro, y
+el 31 de diciembre para años anteriores. Solo cuenta la cuota ordinaria residencial, con importe
+positivo y movimiento vigente; no cuenta parqueos ni otros ingresos.
+
+El mes cubierto se toma de los períodos del movimiento o del mes corregido en el
+recibo. La fecha del movimiento determina si el pago ya existía al corte. Así,
+un pago de septiembre recibido en octubre cubre septiembre al consultar octubre,
+pero todavía aparece pendiente en un corte al 30 de septiembre. Los pagos sin
+mes identificado se señalan para revisión; no se adivina el mes desde su fecha.
+
+El inicio del registro es septiembre de 2026 (`payment_tracking_settings`). La
+casa 3 tiene un antecedente independiente en `property_payment_baselines`: mayo
+a septiembre son cinco meses pendientes al cierre de septiembre, octubre es el
+sexto. Estos antecedentes no generan movimientos ni cambian los saldos de caja;
+la inicialización no sobrescribe correcciones posteriores. Antes del inicio de
+cada casa se muestra «Sin historial», no una deuda supuesta. Meses posteriores al
+corte aparecen «Por vencer», salvo que ya tengan un pago anticipado registrado.
+
+«Pagado» indica cuota con pago registrado, no verificación de que el importe
+cubra toda la obligación. Los pendientes incluyen el mes de corte y se muestran
+tanto para el año elegido como acumulados desde el inicio de la casa. El detalle
+de los reportes financieros y su PDF incluyen «Mes pagado» separado de «Fecha».

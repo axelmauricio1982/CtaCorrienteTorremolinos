@@ -1408,3 +1408,22 @@ tr:last-child td {
     border-radius: 0;
   }
 }
+
+.period-suggestion { display: block; line-height: 1.4; color: var(--primary-strong); }
+.period-suggestion:empty { display: none; }
+
+.report-payments-table { min-width: 1200px; }
+.report-payments-table th, .report-payments-table td { vertical-align: top; }
+.report-payments-table td:nth-child(2) { min-width: 130px; }
+.report-payments-table td:nth-child(4), .report-payments-table td:nth-child(5) { min-width: 160px; }
+.report-payments-table td:nth-child(6), .report-payments-table td:nth-child(7) { white-space: nowrap; }
+.quota-matrix { min-width: 1600px; }
+.quota-matrix td, .quota-matrix th { font-size: 12px; text-align: center; }
+.quota-matrix td:nth-child(2) { min-width: 170px; text-align: left; }
+.quota-matrix th:first-child { position: sticky; left: 0; background: var(--surface); }
+.quota-paid { background: #e3f3e9; color: #155d35; }
+.quota-pending { background: #fbe4e4; color: #8d2525; }
+.quota-future, .quota-outside { background: #f5f5f5; color: #66736f; }
+.quota-legend { display: flex; flex-wrap: wrap; gap: 10px; }
+.quota-legend span { padding: 5px 10px; border-radius: 4px; }
+.quota-notes { line-height: 1.6; }

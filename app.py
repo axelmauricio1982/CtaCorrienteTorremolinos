@@ -26,6 +26,8 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from torremolinos.db import connect, init_db
+from torremolinos.payment_reports import payment_matrix, matrix_pdf, matrix_xlsx, STATUS_LABELS
+from torremolinos.periods import parse_periods, movement_months, save_periods, next_periods
 from torremolinos.onedrive import (
     CLIENT_ID as ONEDRIVE_CLIENT_ID,
     OneDriveError,
@@ -304,6 +306,20 @@ def open_url_in_firefox(url: str) -> None:
         raise ValueError("No fue posible abrir WhatsApp Web en Firefox.") from exc
 
 
+def receipt_period_months(receipt):
+    value = receipt["covered_months"] if "covered_months" in receipt.keys() else None
+    if value:
+        return sorted(int(month) for month in value.split(","))
+    return [receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])]
+
+
+def receipt_period_text(receipt):
+    months = receipt_period_months(receipt)
+    year = receipt["period_year"] or int(receipt["issued_date"][:4])
+    names = ", ".join(MONTHS[month].title() for month in months)
+    return f"{'Mes de' if len(months) == 1 else 'Meses de'} {names} Año {year}"
+
+
 def receipt_whatsapp_message(receipt) -> str:
     receipt_month = (
         receipt["receipt_month"]
@@ -311,7 +327,7 @@ def receipt_whatsapp_message(receipt) -> str:
         or int(receipt["issued_date"][5:7])
     )
     receipt_year = receipt["period_year"] or int(receipt["issued_date"][:4])
-    period = f"Mes de {MONTHS[receipt_month].title()} Año {receipt_year}"
+    period = receipt_period_text(receipt)
     return (
         f"Hola, {receipt['payer_name']}. Le comparto el recibo {receipt['receipt_no']} "
         f"de Residencial Torremolinos, correspondiente a {period}, por "
@@ -435,7 +451,7 @@ def salary_fortnight_prefix(receipt) -> str:
 def receipt_pdf_filename(receipt) -> str:
     month = MONTHS[receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])]
     year = receipt["period_year"] or int(receipt["issued_date"][:4])
-    month_year = f"{month}{year}"
+    month_year = "-".join(MONTHS[item] for item in receipt_period_months(receipt)) + str(year)
     if receipt["direction"] == "INGRESO" and receipt["frequency"] == "MENSUAL":
         house_number = receipt["house_number"]
         house_suffix = f"_CasaNo_{house_number}" if house_number else ""
@@ -472,7 +488,7 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
 
     receipt = conn.execute(
         """
-        SELECT r.*, m.amount_cents, m.period_month, m.period_year, m.reference,
+        SELECT r.*, m.amount_cents, m.period_month, m.period_year, (SELECT group_concat(mp.month) FROM movement_periods mp WHERE mp.movement_id=m.id) AS covered_months, m.reference,
                m.description, p.house_number, p.notes AS property_notes,
                c.name AS concept_name, c.frequency
         FROM receipts r
@@ -590,7 +606,7 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
         (counterpart_label, counterpart),
         ("La cantidad de", receipt["amount_words"]),
         ("Por concepto de", concept_text),
-        ("Periodo", f"Mes de {MONTHS[period_month].title()} Año {period_year}"),
+        ("Periodo", receipt_period_text(receipt)),
         ("Referencia", receipt["reference"] or "No aplica"),
     )
     detail_y = box_y - 38
@@ -813,9 +829,9 @@ def notice(query: dict[str, list[str]]) -> str:
   sync_message = query.get("sync_message", [""])[0]
   if sync_message:
     return f'<div class="notice">{esc(sync_message)}</div>'
-    if "ok" not in query:
-        return ""
-    return '<div class="notice">Operacion registrada correctamente.</div>'
+  if "ok" not in query:
+    return ""
+  return '<div class="notice">Operacion registrada correctamente.</div>'
 
 
 def sync_status() -> dict[str, str]:
@@ -1330,7 +1346,11 @@ def parse_multipart_form_data(raw: bytes, content_type: str) -> dict[str, object
                 data=value,
             )
         else:
-            result[name] = value.decode("utf-8", errors="replace")
+            decoded_value = value.decode("utf-8", errors="replace")
+            if name == "period_months":
+                result.setdefault(name, []).append(decoded_value)
+            else:
+                result[name] = decoded_value
     return result
 
 
@@ -2362,9 +2382,51 @@ def period_from_query(query, default_start: str, default_end: str):
     )
 
 
+def period_selector(selected):
+    month = selected[0] if selected else None
+    return f"""<select name="period_month">{month_options('Sin periodo', month)}</select>"""
+
+
+def period_suggestion_script(conn):
+    payload = json.dumps(next_periods(conn))
+    monthly = json.dumps([str(row['id']) for row in conn.execute("SELECT id FROM concepts WHERE direction='INGRESO' AND frequency='MENSUAL'")])
+    return '''<script>
+    document.addEventListener('DOMContentLoaded', function () {
+      const form = document.querySelector('form[action="/movements"]');
+      const history = HISTORY;
+      const monthly = MONTHLY;
+      const months = form.elements.period_month;
+      const hint = form.querySelector('.period-suggestion');
+      function suggest() {
+        const house = form.elements.property_id.value;
+        const concept = form.elements.concept_id.value;
+        months.required = Boolean(house && monthly.includes(concept));
+        months.value = '';
+        hint.textContent = '';
+        if (!months.required) return;
+        const next = history[house + ':' + concept];
+        if (!next) {
+          hint.textContent = 'Sin historial de períodos para esta casa y concepto. Seleccione el mes que corresponde.';
+          return;
+        }
+        if (next.year > 2100) {
+          hint.textContent = 'El último período registrado está en el límite de años permitido.';
+          return;
+        }
+        months.value = String(next.month);
+        form.elements.period_year.value = next.year;
+        hint.textContent = 'Siguiente período según el último pago: ' + months.selectedOptions[0].text + ' ' + next.year + '. Puede modificarlo.';
+      }
+      form.elements.property_id.addEventListener('change', suggest);
+      form.elements.concept_id.addEventListener('change', suggest);
+      suggest();
+    });
+    </script>'''.replace('HISTORY', payload).replace('MONTHLY', monthly)
+
+
 def render_movements(conn, query) -> str:
     concepts = conn.execute(
-        "SELECT * FROM concepts WHERE active = 1 AND is_deleted = 0 ORDER BY direction, name"
+        "SELECT * FROM concepts WHERE active = 1 AND is_deleted = 0 ORDER BY CASE direction WHEN 'INGRESO' THEN 0 ELSE 1 END, name"
     ).fetchall()
     properties = conn.execute(
         "SELECT * FROM properties WHERE active = 1 AND is_deleted = 0 ORDER BY house_number"
@@ -2411,13 +2473,14 @@ def render_movements(conn, query) -> str:
         "Movimientos",
         f"""
         {notice(query)}
+        {period_suggestion_script(conn)}
         <section class="split">
           <form class="panel form-panel" method="post" action="/movements" enctype="multipart/form-data">
             <h2>Registrar movimiento</h2>
             <label>Fecha <input name="movement_date" type="date" value="{date.today().isoformat()}" required></label>
             <label>Concepto
               <select name="concept_id" required>
-                {select_options(concepts, label_fn=lambda row: f"{row['direction'].title()} - {row['name']}")}
+                {select_options(concepts, selected=next((row['id'] for row in concepts if row['name'] == 'Cuota ordinaria residencial' and row['direction'] == 'INGRESO'), None), label_fn=lambda row: f"{row['direction'].title()} - {row['name']}")}
               </select>
             </label>
             <div class="two-cols">
@@ -2436,10 +2499,11 @@ def render_movements(conn, query) -> str:
             <label>Monto <input name="amount" inputmode="decimal" placeholder="En blanco usa vigencia fija si existe"></label>
             <div class="two-cols">
               <label>Periodo mes
-                <select name="period_month">{month_options('Sin periodo')}</select>
+                {period_selector([])}
               </label>
               <label>Periodo anio <input name="period_year" type="number" min="2000" max="2100" value="{year}"></label>
             </div>
+            <small class="period-suggestion" role="status"></small>
             <div class="two-cols">
               <label>Metodo de pago <input name="payment_method" placeholder="Efectivo, transferencia"></label>
               <label>Referencia <input name="reference" placeholder="Factura, boleta, cheque"></label>
@@ -2456,7 +2520,7 @@ def render_movements(conn, query) -> str:
             <p>Los comprobantes se guardan localmente y se copian automáticamente a {esc(ONEDRIVE_EVIDENCE_DIR)} cuando OneDrive está disponible.</p>
             <p>El tipo del movimiento lo define el concepto seleccionado. Si el concepto requiere recibo, el sistema genera uno automaticamente.</p>
             <p>Los pagos de agua y electricidad quedan en flujo de caja, pero no generan recibo interno por defecto.</p>
-            <p>Si el monto se deja vacio, se intenta usar la vigencia activa del concepto y empleado seleccionado.</p>
+            <p>Al seleccionar la casa se sugiere el siguiente mes de su cuota. Puede modificarlo. Si el monto se deja vacío, se usa la vigencia activa del concepto y empleado seleccionado.</p>
           </aside>
         </section>
 
@@ -2495,7 +2559,7 @@ def render_movement_form(conn, movement_id: int) -> str:
     if not movement:
         raise ValueError("Movimiento no encontrado.")
     concepts = conn.execute(
-        "SELECT * FROM concepts WHERE (active = 1 AND is_deleted = 0) OR id = ? ORDER BY direction, name",
+        "SELECT * FROM concepts WHERE (active = 1 AND is_deleted = 0) OR id = ? ORDER BY CASE direction WHEN 'INGRESO' THEN 0 ELSE 1 END, name",
         (movement["concept_id"],),
     ).fetchall()
     properties = conn.execute(
@@ -2558,7 +2622,7 @@ def render_movement_form(conn, movement_id: int) -> str:
             <label>Monto <input name="amount" inputmode="decimal" value="{money_input(movement['amount_cents'])}" required></label>
             <div class="two-cols">
               <label>Periodo mes
-                <select name="period_month">{month_options('Sin periodo', movement['period_month'])}</select>
+                {period_selector(movement_months(conn, movement))}
               </label>
               <label>Periodo anio <input name="period_year" type="number" min="2000" max="2100" value="{esc(movement['period_year'] or '')}"></label>
             </div>
@@ -2630,7 +2694,22 @@ def render_delete_attachment_confirm(conn, attachment_id: int) -> str:
     )
 
 
-def movement_row(row, include_balance: bool, running_balance: int | None = None, detail: bool = False) -> str:
+def paid_period_label(row):
+    if row["direction"] != "INGRESO":
+        return "No aplica"
+    months = row_value(row, "covered_months")
+    if months:
+        selected = sorted(int(value) for value in months.split(","))
+    else:
+        month = row_value(row, "receipt_month") or row_value(row, "period_month")
+        selected = [month] if month else []
+    if not selected:
+        return "Sin período"
+    year = row_value(row, "period_year") or int(row["movement_date"][:4])
+    return ", ".join(MONTHS[month].title() for month in selected) + f" {year}"
+
+
+def movement_row(row, include_balance: bool, running_balance: int | None = None, detail: bool = False, show_period: bool = False) -> str:
     income = format_money(row["amount_cents"]) if row["direction"] == "INGRESO" else "-"
     expense = format_money(row["amount_cents"]) if row["direction"] == "EGRESO" else "-"
     attachment_badge = attachment_badge_html(int(row_value(row, "attachment_count", 0) or 0))
@@ -2647,6 +2726,7 @@ def movement_row(row, include_balance: bool, running_balance: int | None = None,
         return f"""
         <tr>
           <td>{format_date(row['movement_date'])}</td>
+          {f'<td>{esc(paid_period_label(row))}</td>' if show_period else ''}
           <td>{direction}</td>
           <td>{esc(row['concept_name'])}</td>
           <td>{esc(counterparty)}</td>
@@ -2971,12 +3051,13 @@ def report_movements(conn, start: str, end: str, property_id: int | None = None)
       params.append(property_id)
     return conn.execute(
       f"""
-      SELECT m.*, c.name AS concept_name, r.id AS receipt_id, r.receipt_no,
+      SELECT m.*, c.name AS concept_name, r.id AS receipt_id, r.receipt_no, r.receipt_month,
+           (SELECT group_concat(mp.month) FROM movement_periods mp WHERE mp.movement_id=m.id) AS covered_months,
            p.house_number, p.owner_name, e.name AS employee_name,
            (SELECT COUNT(*) FROM movement_attachments a WHERE a.movement_id = m.id) AS attachment_count
       FROM movements m
       JOIN concepts c ON c.id = m.concept_id
-      LEFT JOIN receipts r ON r.movement_id = m.id
+      LEFT JOIN receipts r ON r.movement_id = m.id AND r.is_deleted = 0 AND r.active = 1
       LEFT JOIN properties p ON p.id = m.property_id
       LEFT JOIN employees e ON e.id = m.employee_id
       WHERE m.is_deleted = 0
@@ -2990,8 +3071,8 @@ def report_movements(conn, start: str, end: str, property_id: int | None = None)
 
 def report_detail_rows(conn, start: str, end: str, property_id: int | None = None) -> str:
     movements = report_movements(conn, start, end, property_id)
-    rows = "".join(movement_row(row, include_balance=False, detail=True) for row in movements)
-    return rows or '<tr><td colspan="9" class="muted">No hay movimientos en este mes.</td></tr>'
+    rows = "".join(movement_row(row, include_balance=False, detail=True, show_period=True) for row in movements)
+    return rows or '<tr><td colspan="10" class="muted">No hay movimientos en este mes.</td></tr>'
 
 
 def report_pdf_filename(start: str, end: str, property_id: int | None = None) -> str:
@@ -3046,20 +3127,23 @@ def build_report_pdf(conn, start: str, end: str, property_id: int | None = None)
       ("PADDING", (0, 0), (-1, -1), 7),
     ]))
     story.extend([summary_table, Spacer(1, 14), Paragraph("<b>Detalle de movimientos</b>", styles["Heading3"])])
-    detail_data = [["Fecha", "Tipo", "Concepto", "Contraparte", "Ingreso", "Egreso", "Referencia"]]
+    detail_data = [["Fecha", "Mes pagado", "Tipo", "Concepto", "Contraparte", "Ingreso", "Egreso", "Referencia"]]
     for row in report_movements(conn, start, end, property_id):
       counterparty = row["counterparty"] or row["employee_name"] or (
         f"Casa {row['house_number']} - {row['owner_name']}" if row["house_number"] else ""
       )
       detail_data.append([
-        format_date(row["movement_date"]), row["direction"].title(), row["concept_name"], counterparty,
+        format_date(row["movement_date"]), paid_period_label(row), row["direction"].title(), row["concept_name"], counterparty,
         format_money(row["amount_cents"]) if row["direction"] == "INGRESO" else "-",
         format_money(row["amount_cents"]) if row["direction"] == "EGRESO" else "-",
         row["reference"] or "",
       ])
     if len(detail_data) == 1:
-      detail_data.append(["No hay movimientos en este periodo.", "", "", "", "", "", ""])
-    detail_table = Table(detail_data, colWidths=[0.8 * inch, 0.75 * inch, 1.7 * inch, 2.35 * inch, 1.05 * inch, 1.05 * inch, 1.55 * inch], repeatRows=1)
+      detail_data.append(["No hay movimientos en este periodo."] + [""] * 7)
+    detail_style = styles["BodyText"].clone("report-detail")
+    detail_style.fontSize, detail_style.leading = 8, 10
+    detail_data = [[Paragraph(esc(str(value)), detail_style) for value in row] for row in detail_data]
+    detail_table = Table(detail_data, colWidths=[.75 * inch, 1.05 * inch, .6 * inch, 1.55 * inch, 2.0 * inch, .95 * inch, .95 * inch, 1.25 * inch], repeatRows=1)
     detail_table.setStyle(TableStyle([
       ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef3f1")),
       ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9e2de")),
@@ -3071,6 +3155,54 @@ def build_report_pdf(conn, start: str, end: str, property_id: int | None = None)
     story.append(detail_table)
     document.build(story)
     return output.getvalue(), report_pdf_filename(start, end, property_id)
+
+
+def payment_matrix_from_query(conn, query):
+    try:
+        year = int(query.get("year", [str(date.today().year)])[0])
+    except (ValueError, TypeError):
+        raise ValueError("Seleccione un año válido.")
+    if not 2000 <= year <= 2100:
+        raise ValueError("El año debe estar entre 2000 y 2100.")
+    cutoff = min(date.today(), date(year, 12, 31))
+    return payment_matrix(conn, year, cutoff.isoformat())
+
+
+def render_payment_matrix(conn, query, matrix):
+    params = urlencode({'year': matrix['year']})
+    rows = []
+    notes = []
+    for row in matrix['rows']:
+        cells = []
+        for cell in row['cells']:
+            tooltip = '; '.join(f"{payment['receipt_no'] or 'Movimiento ' + str(payment['id'])}: recibido {format_date(payment['movement_date'])}" for payment in cell['payments'])
+            cells.append(f'<td class="quota-{cell["status"]}" title="{esc(tooltip)}">{STATUS_LABELS[cell["status"]]}</td>')
+        pending_text = ', '.join(f"{MONTHS[int(period[5:7])].title()} {period[:4]}" for period in row['pending'])
+        rows.append(f'''<tr><th scope="row">Casa {row['house_number']}</th><td>{esc(row['owner_name'])}</td>{''.join(cells)}
+          <td>{row['year_pending']}</td><td title="{esc(pending_text)}">{len(row['pending'])}</td></tr>''')
+        if row['notes']:
+            notes.append(f"<li><strong>Casa {row['house_number']}:</strong> {esc(row['notes'])}</li>")
+    paid_houses = sum(not row['pending'] for row in matrix['rows'])
+    warning = f'<p class="notice">Hay {matrix["unassigned"]} pago(s) de cuota sin mes identificado. No se asignan a un mes automáticamente; revise sus movimientos.</p>' if matrix['unassigned'] else ''
+    return page('Matriz de cuotas', f'''
+    <section class="panel">
+      <div class="section-head"><h2>Cuotas por casa y mes — {matrix['year']}</h2>
+        <div class="actions"><a class="button" href="/reports">Reportes financieros</a>
+        <a class="button" href="/payment-status.pdf?{params}">Descargar PDF</a>
+        <a class="button" href="/payment-status.xlsx?{params}">Descargar Excel</a></div>
+      </div>
+      <form class="filters" action="/payment-status" method="get">
+        <label>Año <input name="year" type="number" min="2000" max="2100" value="{matrix['year']}" required></label>
+        <button class="button primary">Consultar</button>
+      </form>
+      <p>Inicio del registro: <strong>{MONTHS[int(matrix["start"][5:7])]} de {matrix["start"][:4]}</strong>. Se considera el <strong>mes cubierto</strong> por la cuota ordinaria, aunque el dinero se reciba después. Parqueos y otros cobros no cuentan como cuota.</p>
+      <p><strong>{paid_houses} de {len(matrix['rows'])} casas sin meses pendientes</strong> al corte {format_date(matrix['cutoff'])}. Los pendientes incluyen el mes del corte; no se calcula recargo ni vencimiento por día.</p>
+      <div class="quota-legend"><span class="quota-paid">Pagado</span><span class="quota-pending">Pendiente</span><span class="quota-future">Por vencer</span><span class="quota-outside">Sin historial</span></div>
+      <p class="muted">Pagado significa que existe una cuota con pago registrado, no una conciliación de importes. Pase el cursor sobre el pago para ver el recibo y la fecha de recepción. Antes del inicio, «Sin historial» no significa deuda ni pago.</p>
+      {warning}
+      <div class="table-wrap"><table class="quota-matrix"><thead><tr><th>Casa</th><th>Propietario</th>{''.join(f'<th>{name.title()}</th>' for name in MONTHS.values())}<th>Pendientes del año</th><th>Pendientes acumulados al corte</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+      <ul class="quota-notes">{''.join(notes)}</ul>
+    </section>''', '/reports')
 
 
 def render_reports(conn, query) -> str:
@@ -3104,9 +3236,9 @@ def render_reports(conn, query) -> str:
             property_id,
         )
         detail_rows = "".join(
-            movement_row(row, include_balance=False, detail=True)
+            movement_row(row, include_balance=False, detail=True, show_period=True)
             for row in month_movements
-        ) or '<tr><td colspan="9" class="muted">No hay movimientos en este mes.</td></tr>'
+        ) or '<tr><td colspan="10" class="muted">No hay movimientos en este mes.</td></tr>'
         comparison.append({
             "label": month_start.strftime("%b %Y").replace(".", ""),
             "start": month_start.isoformat(),
@@ -3135,8 +3267,8 @@ def render_reports(conn, query) -> str:
             </label>
           </div>
           <div class="table-wrap report-month-table" data-row-count="{item['movement_count']}">
-            <table class="movements-table">
-              <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th class="col-reference">Referencia</th><th>Recibo</th><th>Acciones</th></tr></thead>
+            <table class="report-payments-table">
+              <thead><tr><th>Fecha</th><th>Mes pagado</th><th>Tipo</th><th>Concepto</th><th>Contraparte</th><th>Ingreso</th><th>Egreso</th><th class="col-reference">Referencia</th><th>Recibo</th><th>Acciones</th></tr></thead>
               <tbody>{item['details']}</tbody>
             </table>
           </div>
@@ -3153,6 +3285,7 @@ def render_reports(conn, query) -> str:
         <section class="panel">
           <div class="section-head">
             <h2>Reportes financieros</h2>
+            <a class="button primary" href="/payment-status">Matriz de cuotas por casa</a>
             <a class="button" href="{report_pdf_url}">Descargar PDF</a>
           </div>
           <form class="filters" method="get" action="/reports">
@@ -3541,7 +3674,7 @@ def render_receipt(conn, receipt_id: int) -> str:
             r.*,
             m.amount_cents,
             m.period_month,
-            m.period_year,
+            m.period_year, (SELECT group_concat(mp.month) FROM movement_periods mp WHERE mp.movement_id=m.id) AS covered_months,
             m.payment_method,
             m.reference,
             m.description,
@@ -3569,7 +3702,7 @@ def render_receipt(conn, receipt_id: int) -> str:
     counterpart_value = receipt["payer_name"] if receipt["direction"] == "INGRESO" else receipt["receiver_name"]
     receipt_month = receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])
     receipt_year = receipt["period_year"] or int(receipt["issued_date"][:4])
-    period = f"Mes de {MONTHS[receipt_month].title()} Año {receipt_year}"
+    period = receipt_period_text(receipt)
     concept_text = receipt_concept_text(receipt)
     pdf_filename = receipt_pdf_filename(receipt)
     month_options = "".join(
@@ -3606,9 +3739,9 @@ def render_receipt(conn, receipt_id: int) -> str:
     <form class="receipt-preview-controls" method="post" action="/receipt/update">
       <input type="hidden" name="receipt_id" value="{receipt_id}">
       <label>Mes aplicado al recibo
-        <select name="receipt_month" onchange="this.form.submit()">{month_options}</select>
+        <select name="receipt_month" {"disabled" if len(receipt_period_months(receipt)) > 1 else ""} onchange="this.form.submit()">{month_options}</select>
       </label>
-      <span class="muted">La vista se actualiza al seleccionar el mes.</span>
+      <span class="muted">Para varios meses, edite el movimiento. Cambiar aquí el mes también corrige su período registrado.</span>
     </form>
     <article class="receipt">
       <header>
@@ -3741,6 +3874,20 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                     self.send_html(render_account_statement(conn, query))
                 elif parsed.path == "/reports":
                     self.send_html(render_reports(conn, query))
+                elif parsed.path in {"/payment-status", "/payment-status.pdf", "/payment-status.xlsx"}:
+                    matrix = payment_matrix_from_query(conn, query)
+                    if parsed.path.endswith(".pdf"):
+                        self.send_pdf(matrix_pdf(matrix), f"cuotas-{matrix['year']}.pdf")
+                    elif parsed.path.endswith(".xlsx"):
+                        content = matrix_xlsx(matrix)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        self.send_header("Content-Disposition", f"attachment; filename=cuotas-{matrix['year']}.xlsx")
+                        self.send_header("Content-Length", str(len(content)))
+                        self.end_headers()
+                        self.wfile.write(content)
+                    else:
+                        self.send_html(render_payment_matrix(conn, query, matrix))
                 elif parsed.path == "/reports.pdf":
                   today = date.today()
                   property_id = parse_int(query.get("property_id", [""])[0])
@@ -3878,7 +4025,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         receipt = conn.execute(
             """
             SELECT r.receipt_no, r.issued_date, r.direction, r.receipt_month,
-                   r.payer_name, m.amount_cents, m.period_month, m.period_year,
+                   r.payer_name, m.amount_cents, m.period_month, m.period_year, (SELECT group_concat(mp.month) FROM movement_periods mp WHERE mp.movement_id=m.id) AS covered_months,
                    p.phone_number, p.whatsapp_enabled
             FROM receipts r
             JOIN movements m ON m.id = r.movement_id
@@ -3903,6 +4050,15 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         receipt_month = parse_int(data.get("receipt_month"))
         if not receipt_id or not receipt_month or not 1 <= receipt_month <= 12:
             raise ValueError("Debe seleccionar un mes valido para el recibo.")
+        movement = conn.execute("SELECT m.* FROM movements m JOIN receipts r ON r.movement_id=m.id WHERE r.id=? AND r.is_deleted=0 AND m.is_deleted=0", (receipt_id,)).fetchone()
+        if not movement:
+            raise ValueError("Recibo no encontrado.")
+        if len(movement_months(conn, movement)) > 1:
+            raise ValueError("Edite los meses desde el movimiento para conservar todos los períodos.")
+        period_year = movement["period_year"] or int(movement["movement_date"][:4])
+        conn.execute("UPDATE movements SET period_month=?, period_year=?, updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE id=?", (receipt_month, period_year, CURRENT_USER, movement["id"]))
+        save_periods(conn, movement["id"], [receipt_month], period_year)
+        add_movement_log(conn, movement["id"], "UPDATED", f"Período corregido desde recibo: {receipt_month}/{period_year}.")
         updated = conn.execute(
             """
             UPDATE receipts
@@ -3924,7 +4080,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
 
         decoded = raw.decode("utf-8")
         parsed = parse_qs(decoded, keep_blank_values=True)
-        return {key: values[0].strip() for key, values in parsed.items()}
+        return {key: [value.strip() for value in values] if key == "period_months" else values[0].strip() for key, values in parsed.items()}
 
     def add_property(self, conn, data) -> None:
         phone_number = normalize_phone_number(data.get("phone_number", ""))
@@ -4318,6 +4474,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             raise ValueError("Debe seleccionar un concepto valido.")
           movement_date = data.get("movement_date") or date.today().isoformat()
           employee_id = parse_int(data.get("employee_id"))
+          months, period_year = parse_periods(data)
           amount_raw = data.get("amount")
           if amount_raw:
             amount_cents = parse_money(amount_raw)
@@ -4325,7 +4482,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             rate = current_rate(conn, concept_id, employee_id, movement_date)
             if not rate:
               raise ValueError("El concepto no tiene una vigencia activa para esa fecha; ingrese el monto manualmente.")
-            amount_cents = rate["amount_cents"]
+            amount_cents = rate["amount_cents"] * max(1, len(months))
           conn.execute(
             """
             UPDATE movements
@@ -4343,8 +4500,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
               employee_id,
               data.get("counterparty", ""),
               amount_cents,
-              parse_int(data.get("period_month")),
-              parse_int(data.get("period_year")),
+              months[0] if months else None,
+              period_year,
               data.get("payment_method", ""),
               data.get("reference", ""),
               data.get("description", "") or concept["name"],
@@ -4352,6 +4509,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
               movement_id,
             ),
           )
+          save_periods(conn, movement_id, months, period_year)
           add_movement_log(conn, movement_id, "UPDATED", f"Movimiento actualizado: {concept['name']}.", CURRENT_USER)
           attachment = data.get("attachment")
           if attachment is not None and hasattr(attachment, "filename"):
@@ -4423,6 +4581,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         movement_date = data.get("movement_date") or date.today().isoformat()
         property_id = parse_int(data.get("property_id"))
         employee_id = parse_int(data.get("employee_id"))
+        months, period_year = parse_periods(data)
         amount_raw = data.get("amount")
         if amount_raw:
             amount_cents = parse_money(amount_raw)
@@ -4434,7 +4593,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 "esa fecha. Seleccione Cuota ordinaria residencial para registrar "
                 "el pago mensual o ingrese el monto manualmente para un servicio variable."
               )
-            amount_cents = rate["amount_cents"]
+            amount_cents = rate["amount_cents"] * max(1, len(months))
         cursor = conn.execute(
             """
             INSERT INTO movements (
@@ -4464,8 +4623,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 employee_id,
                 data.get("counterparty", ""),
                 amount_cents,
-                parse_int(data.get("period_month")),
-                parse_int(data.get("period_year")),
+                months[0] if months else None,
+                period_year,
                 data.get("payment_method", ""),
                 data.get("reference", ""),
                 data.get("description", "") or concept["name"],
@@ -4474,6 +4633,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             ),
         )
         movement_id = int(cursor.lastrowid)
+        save_periods(conn, movement_id, months, period_year)
         add_movement_log(conn, movement_id, "CREATED", f"Movimiento registrado: {concept['name']}.", CURRENT_USER)
 
         attachment = data.get("attachment")

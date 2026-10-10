@@ -101,6 +101,13 @@ CREATE TABLE IF NOT EXISTS movements (
     FOREIGN KEY (employee_id) REFERENCES employees(id)
 );
 
+CREATE TABLE IF NOT EXISTS movement_periods (
+    movement_id INTEGER NOT NULL REFERENCES movements(id),
+    year INTEGER NOT NULL CHECK (year BETWEEN 2000 AND 2100),
+    month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+    PRIMARY KEY (movement_id, year, month)
+);
+
 CREATE INDEX IF NOT EXISTS idx_movements_date ON movements(movement_date, id);
 CREATE INDEX IF NOT EXISTS idx_movements_property ON movements(property_id);
 CREATE INDEX IF NOT EXISTS idx_movements_employee ON movements(employee_id);
@@ -161,6 +168,23 @@ CREATE TABLE IF NOT EXISTS receipts (
     created_by TEXT NOT NULL DEFAULT 'ADM' CHECK (length(created_by) <= 5),
     updated_by TEXT NOT NULL DEFAULT 'ADM' CHECK (length(updated_by) <= 5),
     FOREIGN KEY (movement_id) REFERENCES movements(id)
+);
+
+CREATE TABLE IF NOT EXISTS payment_tracking_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    start_period TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT NOT NULL DEFAULT 'ADM'
+);
+
+CREATE TABLE IF NOT EXISTS property_payment_baselines (
+    property_id INTEGER PRIMARY KEY REFERENCES properties(id),
+    start_period TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT NOT NULL DEFAULT 'ADM',
+    updated_by TEXT NOT NULL DEFAULT 'ADM'
 );
 
 CREATE TABLE IF NOT EXISTS cash_settings (
@@ -342,6 +366,12 @@ def init_db(db_path: str | Path) -> None:
         seed_concepts(conn)
         seed_initial_rates(conn)
         seed_cash_settings(conn)
+        conn.execute("INSERT OR IGNORE INTO payment_tracking_settings (id, start_period) VALUES (1, '2026-09')")
+        conn.execute("""
+            INSERT OR IGNORE INTO property_payment_baselines (property_id, start_period, notes)
+            SELECT id, '2026-05', 'Antecedente informado: cinco meses pendientes al cierre de septiembre de 2026 (mayo a septiembre); octubre es el sexto. No representa un movimiento de caja.'
+            FROM properties WHERE house_number = 3
+        """)
         conn.execute("PRAGMA optimize")
 
 
