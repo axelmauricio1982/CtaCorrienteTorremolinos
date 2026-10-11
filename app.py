@@ -3180,8 +3180,11 @@ def render_payment_matrix(conn, query, matrix):
         pending_text = ', '.join(f"{MONTHS[int(period[5:7])].title()} {period[:4]}" for period in row['pending'])
         rows.append(f'''<tr><th scope="row">Casa {row['house_number']}</th><td>{esc(row['owner_name'])}</td>{''.join(cells)}
           <td>{row['year_pending']}</td><td title="{esc(pending_text)}">{len(row['pending'])}</td></tr>''')
-        if row['notes']:
-            notes.append(f"<li><strong>Casa {row['house_number']}:</strong> {esc(row['notes'])}</li>")
+        if len(row['pending']) > 1:
+            notes.append(
+                f"<li><strong>Casa {row['house_number']}: {len(row['pending'])} cuotas pendientes.</strong> "
+                f"Meses: {esc(pending_text)}.</li>"
+            )
     paid_houses = sum(not row['pending'] for row in matrix['rows'])
     warning = f'<p class="notice">Hay {matrix["unassigned"]} pago(s) de cuota sin mes identificado. No se asignan a un mes automáticamente; revise sus movimientos.</p>' if matrix['unassigned'] else ''
     return page('Matriz de cuotas', f'''
@@ -3201,7 +3204,11 @@ def render_payment_matrix(conn, query, matrix):
       <p class="muted">Pagado significa que existe una cuota con pago registrado, no una conciliación de importes. Pase el cursor sobre el pago para ver el recibo y la fecha de recepción. Antes del inicio, «Sin historial» no significa deuda ni pago.</p>
       {warning}
       <div class="table-wrap"><table class="quota-matrix"><thead><tr><th>Casa</th><th>Propietario</th>{''.join(f'<th>{name.title()}</th>' for name in MONTHS.values())}<th>Pendientes del año</th><th>Pendientes acumulados al corte</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
-      <ul class="quota-notes">{''.join(notes)}</ul>
+      <aside class="quota-arrears" aria-label="Casas con varias cuotas pendientes">
+        <h3>Casas con más de una cuota pendiente al {format_date(matrix['cutoff'])}</h3>
+        {('<ul class="quota-notes">' + ''.join(notes) + '</ul>') if notes else '<p>No hay casas con más de una cuota pendiente al corte.</p>'}
+        <p class="muted">Se muestran los pendientes acumulados al corte, incluidos los de años anteriores. La lista se actualiza al consultar el reporte después de registrar o corregir pagos.</p>
+      </aside>
     </section>''', '/reports')
 
 
