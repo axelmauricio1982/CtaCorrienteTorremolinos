@@ -36,14 +36,6 @@ esac
   --collect-all msal \
   app.py
 
-mkdir -p "dist/data/attachments"
-if [[ -f "data/torremolinos.sqlite3" && ! -f "dist/data/torremolinos.sqlite3" ]]; then
-  cp "data/torremolinos.sqlite3" "dist/data/torremolinos.sqlite3"
-fi
-if [[ -d "data/attachments" ]]; then
-  cp -R "data/attachments/." "dist/data/attachments/"
-fi
-
 echo
 echo "Ejecutable creado en: dist/$APP_NAME"
-echo "Los datos persistentes se guardan en: dist/data"
+echo "Base unica del proyecto: data/torremolinos.sqlite3"

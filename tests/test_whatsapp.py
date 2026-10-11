@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,7 +97,7 @@ class WhatsAppTests(unittest.TestCase):
 
     def test_migrates_existing_properties_without_overwriting_names(self):
         legacy_database = Path(self.temporary_directory.name) / "legacy.sqlite3"
-        with sqlite3.connect(legacy_database) as conn:
+        with closing(sqlite3.connect(legacy_database)) as conn, conn:
             conn.executescript(
                 """
                 CREATE TABLE properties (

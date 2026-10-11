@@ -91,8 +91,12 @@ tu clon de git, los datos se guardan en `data\` en la raíz del repositorio
 si copiaste solamente el ejecutable fuera del repositorio, los datos quedan
 junto a él en `dist\data`.
 
-Al recompilar, el constructor conserva cualquier base que ya exista dentro de
-`dist\data` y agrega las evidencias disponibles en el proyecto.
+Los constructores de Windows, macOS y Linux no duplican la base ni las evidencias
+en `dist/data`. Dentro del repositorio, la ?nica base activa es
+`data/torremolinos.sqlite3`; Push/Pull usan esa misma base en la rama `data-sync`.
+Para trasladar una instalaci?n fuera del repositorio, copie deliberadamente la
+carpeta `data` junto al ejecutable. Las copias antiguas de `dist/data` deben
+respaldarse y revisarse antes de retirarlas.
 
 No muevas solamente `Torremolinos.exe` después de comenzar a usarlo si lo
 copiaste de forma portátil: mueve toda la carpeta `dist` para conservar

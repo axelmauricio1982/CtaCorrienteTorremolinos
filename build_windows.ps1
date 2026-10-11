@@ -45,21 +45,6 @@ foreach ($obsoleteExecutable in $obsoleteExecutables) {
     }
 }
 
-$dataDirectory = Join-Path $projectRoot "dist\data"
-$attachmentsDirectory = Join-Path $dataDirectory "attachments"
-New-Item -ItemType Directory -Force -Path $attachmentsDirectory | Out-Null
-
-$database = Join-Path $projectRoot "data\torremolinos.sqlite3"
-$packagedDatabase = Join-Path $dataDirectory "torremolinos.sqlite3"
-if ((Test-Path -LiteralPath $database) -and -not (Test-Path -LiteralPath $packagedDatabase)) {
-    Copy-Item -LiteralPath $database -Destination $packagedDatabase
-}
-
-$sourceAttachments = Join-Path $projectRoot "data\attachments"
-if (Test-Path -LiteralPath $sourceAttachments) {
-    Copy-Item -Path (Join-Path $sourceAttachments "*") -Destination $attachmentsDirectory -Recurse -Force
-}
-
 Write-Host ""
 Write-Host "Ejecutable creado en: dist\$Name.exe"
-Write-Host "Los datos persistentes se guardan en: dist\data"
+Write-Host "Base unica del proyecto: data\torremolinos.sqlite3"
