@@ -92,11 +92,18 @@ si copiaste solamente el ejecutable fuera del repositorio, los datos quedan
 junto a él en `dist\data`.
 
 Los constructores de Windows, macOS y Linux no duplican la base ni las evidencias
-en `dist/data`. Dentro del repositorio, la ?nica base activa es
+en `dist/data`. Dentro del repositorio, la única base activa es
 `data/torremolinos.sqlite3`; Push/Pull usan esa misma base en la rama `data-sync`.
-Para trasladar una instalaci?n fuera del repositorio, copie deliberadamente la
+Para trasladar una instalación fuera del repositorio, copie deliberadamente la
 carpeta `data` junto al ejecutable. Las copias antiguas de `dist/data` deben
 respaldarse y revisarse antes de retirarlas.
+
+> **2026-10-12:** se eliminó la copia antigua `dist/data` (del 2026-09-22) porque
+> ya no era necesaria. Antes de borrarla se comparó con `data/`: los 5
+> comprobantes eran idénticos byte a byte y la base no tenía ningún registro que
+> no existiera ya en `data/torremolinos.sqlite3`; la única diferencia era una
+> versión anterior del concepto "Insumos para trabajadores", que en la base
+> actual ya tiene una edición posterior.
 
 No muevas solamente `Torremolinos.exe` después de comenzar a usarlo si lo
 copiaste de forma portátil: mueve toda la carpeta `dist` para conservar
