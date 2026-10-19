@@ -3674,7 +3674,7 @@ def render_receipts(conn, query) -> str:
     )
 
 
-def render_receipt(conn, receipt_id: int) -> str:
+def render_receipt(conn, receipt_id: int, refreshed: bool = False) -> str:
     receipt = conn.execute(
         """
         SELECT
@@ -3742,7 +3742,13 @@ def render_receipt(conn, receipt_id: int) -> str:
       <a class="button" href="/receipt/{receipt_id}.pdf">Descargar PDF con evidencia</a>
       {whatsapp_action}
       <button class="button primary" onclick="window.print()">Guardar {esc(pdf_filename)}</button>
+      <form method="post" action="/receipt/refresh"
+            onsubmit="return confirm('Esto reemplaza el nombre, concepto y monto en letras de este recibo con los datos actuales del sistema. El período y el monto en numeros no cambian. ¿Continuar?');">
+        <input type="hidden" name="receipt_id" value="{receipt_id}">
+        <button class="button" type="submit">Actualizar datos con la informacion actual</button>
+      </form>
     </div>
+    {'<div class="notice">Datos del recibo actualizados con la informacion actual.</div>' if refreshed else ''}
     <form class="receipt-preview-controls" method="post" action="/receipt/update">
       <input type="hidden" name="receipt_id" value="{receipt_id}">
       <label>Mes aplicado al recibo
@@ -3921,7 +3927,8 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                   self.send_pdf(pdf_bytes, filename)
                 elif parsed.path.startswith("/receipt/"):
                     receipt_id = int(parsed.path.rsplit("/", 1)[1])
-                    self.send_html(render_receipt(conn, receipt_id))
+                    refreshed = query.get("refreshed", [""])[0] == "1"
+                    self.send_html(render_receipt(conn, receipt_id, refreshed))
                 else:
                     body, status = error_page("Pagina no encontrada.", 404)
                     self.send_html(body, status)
@@ -4020,6 +4027,10 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 elif parsed.path == "/receipt/whatsapp":
                     self.open_receipt_whatsapp(conn, data)
                     self.send_json({"ok": True})
+                elif parsed.path == "/receipt/refresh":
+                    self.refresh_receipt_snapshot(conn, data)
+                    receipt_id = parse_int(data.get("receipt_id"))
+                    self.redirect(f"/receipt/{receipt_id}?refreshed=1")
                 else:
                     body, status = error_page("Ruta no encontrada.", 404)
                     self.send_html(body, status)
@@ -4076,6 +4087,32 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
         ).rowcount
         if not updated:
             raise ValueError("Recibo no encontrado.")
+
+    def refresh_receipt_snapshot(self, conn, data) -> None:
+        receipt_id = parse_int(data.get("receipt_id"))
+        if not receipt_id:
+            raise ValueError("Recibo no encontrado.")
+        movement = conn.execute(
+            """
+            SELECT m.id, m.concept_id
+            FROM movements m JOIN receipts r ON r.movement_id = m.id
+            WHERE r.id = ? AND r.is_deleted = 0 AND m.is_deleted = 0
+            """,
+            (receipt_id,),
+        ).fetchone()
+        if not movement:
+            raise ValueError("Recibo no encontrado.")
+        concept = conn.execute(
+            "SELECT * FROM concepts WHERE id = ?", (movement["concept_id"],)
+        ).fetchone()
+        self.sync_movement_receipt(conn, movement["id"], concept)
+        add_movement_log(
+            conn,
+            movement["id"],
+            "UPDATED",
+            "Datos del recibo actualizados con la informacion actual (nombre, concepto, etc.).",
+            CURRENT_USER,
+        )
 
     def read_form(self) -> dict[str, object]:
         length = int(self.headers.get("Content-Length", "0"))
