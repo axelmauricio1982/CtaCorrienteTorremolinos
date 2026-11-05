@@ -41,14 +41,15 @@ class PaymentReportsTests(unittest.TestCase):
 
     def test_initial_arrears_and_unknown_history_future_months(self):
         row = self.row(3)
-        self.assertEqual(row['pending'], [f'2026-{month:02d}' for month in range(5,11)])
-        self.assertEqual(row['cells'][3]['status'], 'outside')
+        self.assertEqual(row['pending'], [f'2026-{month:02d}' for month in range(4,11)])
+        self.assertEqual(row['cells'][2]['status'], 'outside')
+        self.assertEqual(row['cells'][3]['status'], 'pending')
         self.assertEqual(row['cells'][10]['status'], 'future')
-        self.assertEqual(len(self.row(3, '2026-09-30')['pending']), 5)
+        self.assertEqual(len(self.row(3, '2026-09-30')['pending']), 6)
         self.assertEqual(self.row(6)['pending'], ['2026-09', '2026-10'])
         self.assertEqual(self.row(6)['cells'][7]['status'], 'outside')
         self.pay(3, '5')
-        self.assertEqual(len(self.row(3)['pending']), 5)
+        self.assertEqual(len(self.row(3)['pending']), 6)
 
     def test_parking_deleted_zero_payments_do_not_cover_quota(self):
         other = self.conn.execute("INSERT INTO concepts (name,direction,frequency) VALUES ('Parqueo prueba','INGRESO','MENSUAL')").lastrowid
@@ -114,23 +115,23 @@ class PaymentReportsTests(unittest.TestCase):
             matrix = payment_matrix(self.conn, 2026, cutoff)
             page = app.render_payment_matrix(self.conn, {}, matrix)
             return page.split('<aside class="quota-arrears"', 1)[1].split('</aside>', 1)[0]
-        self.assertIn('Casa 3: 6 cuotas pendientes.', notice())
+        self.assertIn('Casa 3: 7 cuotas pendientes.', notice())
         self.assertIn('Casa 14: 2 cuotas pendientes.', notice())
         self.assertNotIn('Antecedente informado', notice())
         self.pay(14, '9')
         self.assertNotIn('Casa 14:', notice())
-        for month in range(5, 10):
+        for month in range(4, 10):
             self.pay(3, str(month))
         self.assertNotIn('Casa 3:', notice())
-        self.assertIn('Casa 3: 5 cuotas pendientes.', notice('2026-09-30'))
+        self.assertIn('Casa 3: 6 cuotas pendientes.', notice('2026-09-30'))
         self.pay(3, '10')
         self.assertNotIn('Casa 3:', notice())
 
     def test_dynamic_notice_empty_state_and_prior_year_arrears(self):
         matrix = payment_matrix(self.conn, 2027, '2027-01-10', 3)
         page = app.render_payment_matrix(self.conn, {}, matrix)
-        self.assertIn('Casa 3: 9 cuotas pendientes.', page)
-        self.assertIn('Mayo 2026', page)
+        self.assertIn('Casa 3: 10 cuotas pendientes.', page)
+        self.assertIn('Abril 2026', page)
         self.assertIn('Enero 2027', page)
         matrix = payment_matrix(self.conn, 2026, '2026-10-10', 14)
         self.pay(14, '9')

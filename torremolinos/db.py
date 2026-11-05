@@ -369,7 +369,7 @@ def init_db(db_path: str | Path) -> None:
         conn.execute("INSERT OR IGNORE INTO payment_tracking_settings (id, start_period) VALUES (1, '2026-09')")
         conn.execute("""
             INSERT OR IGNORE INTO property_payment_baselines (property_id, start_period, notes)
-            SELECT id, '2026-05', 'Antecedente informado: cinco meses pendientes al cierre de septiembre de 2026 (mayo a septiembre); octubre es el sexto. No representa un movimiento de caja.'
+            SELECT id, '2026-04', 'Antecedente informado: sin pagos registrados desde abril de 2026 (inclusive). No representa un movimiento de caja.'
             FROM properties WHERE house_number = 3
         """)
         conn.execute("PRAGMA optimize")
