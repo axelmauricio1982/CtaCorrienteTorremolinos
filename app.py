@@ -489,7 +489,7 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
     receipt = conn.execute(
         """
         SELECT r.*, m.amount_cents, m.period_month, m.period_year, (SELECT group_concat(mp.month) FROM movement_periods mp WHERE mp.movement_id=m.id) AS covered_months, m.reference,
-               m.description, p.house_number, p.notes AS property_notes,
+               m.description, m.receipt_text, p.house_number, p.notes AS property_notes,
                c.name AS concept_name, c.frequency
         FROM receipts r
         JOIN movements m ON m.id = r.movement_id
@@ -504,7 +504,7 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
 
     period_month = receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])
     period_year = receipt["period_year"] or int(receipt["issued_date"][:4])
-    concept_text = receipt_concept_text(receipt)
+    concept_text = stored_receipt_concept_text(receipt)
     counterpart = receipt["payer_name"] if receipt["direction"] == "INGRESO" else receipt["receiver_name"]
     counterpart_label = "Recibí de" if receipt["direction"] == "INGRESO" else "Pagado a"
     title = "Recibo de ingreso" if receipt["direction"] == "INGRESO" else "Comprobante de egreso"
@@ -668,6 +668,10 @@ def build_receipt_pdf(conn, receipt_id: int) -> tuple[bytes, str]:
 
 
 def receipt_concept_text(movement) -> str:
+    if "receipt_text" in movement.keys():
+      custom_text = str(movement["receipt_text"] or "").strip()
+      if custom_text:
+        return custom_text
     concept_name = str(movement["concept_name"] or "").strip()
     normalized_name = concept_name.casefold()
     annual_concepts = {
@@ -689,6 +693,12 @@ def receipt_concept_text(movement) -> str:
 
     description = str(movement["description"] or "").strip()
     return description or concept_name
+
+
+def stored_receipt_concept_text(receipt) -> str:
+    """Texto emitido en el recibo; solo se recalcula si no hay copia guardada."""
+    stored = str(receipt["concept_text"] or "").strip()
+    return stored or receipt_concept_text(receipt)
 
 
 def amount_to_words(cents: int) -> str:
@@ -2508,7 +2518,8 @@ def render_movements(conn, query) -> str:
               <label>Metodo de pago <input name="payment_method" placeholder="Efectivo, transferencia"></label>
               <label>Referencia <input name="reference" placeholder="Factura, boleta, cheque"></label>
             </div>
-            <label>Descripcion <textarea name="description" rows="3" placeholder="Detalle que aparecera en el flujo y, si aplica, en el recibo"></textarea></label>
+            <label>Descripcion <textarea name="description" rows="3" placeholder="Detalle interno para el flujo de caja y la bitacora"></textarea></label>
+            <label>Texto para el recibo (opcional) <textarea name="receipt_text" rows="2" placeholder="Por concepto de... En blanco usa el texto automatico"></textarea></label>
             <label>Comprobante / evidencia (opcional)
               <input type="file" name="attachment" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf">
             </label>
@@ -2520,6 +2531,7 @@ def render_movements(conn, query) -> str:
             <p>Los comprobantes se guardan localmente y se copian automáticamente a {esc(ONEDRIVE_EVIDENCE_DIR)} cuando OneDrive está disponible.</p>
             <p>El tipo del movimiento lo define el concepto seleccionado. Si el concepto requiere recibo, el sistema genera uno automaticamente.</p>
             <p>Los pagos de agua y electricidad quedan en flujo de caja, pero no generan recibo interno por defecto.</p>
+            <p>El campo "Texto para el recibo" reemplaza el "Por concepto de" del recibo. Si se deja vacio se usa el texto automatico (notas de la casa, parqueo, conceptos anuales o la descripcion en egresos).</p>
             <p>Al seleccionar la casa se sugiere el siguiente mes de su cuota. Puede modificarlo. Si el monto se deja vacío, se usa la vigencia activa del concepto y empleado seleccionado.</p>
           </aside>
         </section>
@@ -2631,6 +2643,7 @@ def render_movement_form(conn, movement_id: int) -> str:
               <label>Referencia <input name="reference" value="{esc(movement['reference'])}"></label>
             </div>
             <label>Descripcion <textarea name="description" rows="3">{esc(movement['description'])}</textarea></label>
+            <label>Texto para el recibo (opcional) <textarea name="receipt_text" rows="2" placeholder="Por concepto de... En blanco usa el texto automatico">{esc(movement['receipt_text'])}</textarea></label>
             {attachments_note}
             <label>Agregar comprobante / evidencia
               <input type="file" name="attachment" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf">
@@ -3685,6 +3698,7 @@ def render_receipt(conn, receipt_id: int, refreshed: bool = False) -> str:
             m.payment_method,
             m.reference,
             m.description,
+            m.receipt_text,
             p.house_number,
             p.phone_number,
             p.whatsapp_enabled,
@@ -3710,7 +3724,7 @@ def render_receipt(conn, receipt_id: int, refreshed: bool = False) -> str:
     receipt_month = receipt["receipt_month"] or receipt["period_month"] or int(receipt["issued_date"][5:7])
     receipt_year = receipt["period_year"] or int(receipt["issued_date"][:4])
     period = receipt_period_text(receipt)
-    concept_text = receipt_concept_text(receipt)
+    concept_text = stored_receipt_concept_text(receipt)
     pdf_filename = receipt_pdf_filename(receipt)
     month_options = "".join(
       f'<option value="{month}"{selected_attr(month, receipt_month)}>{esc(name.title())}</option>'
@@ -4533,7 +4547,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
             SET movement_date = ?, direction = ?, concept_id = ?, property_id = ?,
               employee_id = ?, counterparty = ?, amount_cents = ?, period_month = ?,
               period_year = ?, payment_method = ?, reference = ?, description = ?,
-              updated_at = CURRENT_TIMESTAMP, updated_by = ?
+              receipt_text = ?, updated_at = CURRENT_TIMESTAMP, updated_by = ?
             WHERE id = ? AND is_deleted = 0
             """,
             (
@@ -4549,6 +4563,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
               data.get("payment_method", ""),
               data.get("reference", ""),
               data.get("description", "") or concept["name"],
+              data.get("receipt_text", ""),
               CURRENT_USER,
               movement_id,
             ),
@@ -4653,11 +4668,12 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 payment_method,
                 reference,
                 description,
+                receipt_text,
                 updated_at,
                 created_by,
                 updated_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
             """,
             (
                 movement_date,
@@ -4672,6 +4688,7 @@ class TorremolinosHandler(BaseHTTPRequestHandler):
                 data.get("payment_method", ""),
                 data.get("reference", ""),
                 data.get("description", "") or concept["name"],
+                data.get("receipt_text", ""),
                 CURRENT_USER,
                 CURRENT_USER,
             ),

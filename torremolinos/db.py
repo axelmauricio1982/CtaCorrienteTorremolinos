@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS movements (
     payment_method TEXT NOT NULL DEFAULT '',
     reference TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
+    receipt_text TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     is_deleted INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -411,6 +412,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         add_column_if_missing(conn, table, "updated_by", "TEXT NOT NULL DEFAULT 'ADM'")
         if table == "receipts":
             add_column_if_missing(conn, table, "receipt_month", "INTEGER")
+        if table == "movements":
+            add_column_if_missing(conn, table, "receipt_text", "TEXT NOT NULL DEFAULT ''")
         conn.execute(
             f"""
             UPDATE {table}
